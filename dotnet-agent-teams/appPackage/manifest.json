@@ -1,0 +1,66 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.21/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.21",
+  "version": "1.0.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "Agent 365 Demos",
+    "websiteUrl": "https://github.com/qmatteoq/agent365-demos",
+    "privacyUrl": "https://github.com/qmatteoq/agent365-demos",
+    "termsOfUseUrl": "https://github.com/qmatteoq/agent365-demos"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Microsoft Learn Agent",
+    "full": "Microsoft Learn Research Agent"
+  },
+  "description": {
+    "short": "Answers Microsoft ecosystem questions from official Microsoft Learn docs.",
+    "full": "A research agent that answers questions about the Microsoft ecosystem - Azure, Microsoft 365, Power Platform, .NET, Microsoft Entra, Copilot and Dynamics 365. It grounds every answer in the official Microsoft Learn documentation using the Microsoft Learn MCP server and cites its sources."
+  },
+  "accentColor": "#0078D4",
+  "bots": [
+    {
+      "botId": "${{BOT_ID}}",
+      "scopes": [
+        "personal",
+        "team",
+        "groupChat",
+        "copilot"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "personal",
+            "team",
+            "groupChat"
+          ],
+          "commands": [
+            {
+              "title": "/reset",
+              "description": "Start a fresh conversation"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "copilotAgents": {
+    "customEngineAgents": [
+      {
+        "type": "bot",
+        "id": "${{BOT_ID}}"
+      }
+    ]
+  },
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": []
+}
