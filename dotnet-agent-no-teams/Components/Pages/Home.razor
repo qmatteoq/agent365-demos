@@ -1,0 +1,97 @@
+@page "/"
+@rendermode InteractiveServer
+@using Microsoft.Agents.AI
+@inject AIAgent Agent
+@implements IAsyncDisposable
+
+<PageTitle>Microsoft Learn Agent</PageTitle>
+
+<div class="chat-container">
+    <h1>Microsoft Learn Agent</h1>
+    <p class="subtitle">Microsoft Agent Framework (.NET) + Azure OpenAI + Microsoft Learn MCP server</p>
+
+    <div class="messages">
+        @if (_messages.Count == 0 && !_isThinking)
+        {
+            <p class="empty">Ask me anything about Azure, Microsoft 365, .NET, Power Platform or any other Microsoft technology.</p>
+        }
+        @foreach (var msg in _messages)
+        {
+            <div class="msg @msg.Role">
+                <div class="role">@msg.Role</div>
+                <div class="text">@msg.Text</div>
+            </div>
+        }
+        @if (_isThinking)
+        {
+            <div class="msg assistant">
+                <div class="role">assistant</div>
+                <div class="text"><em>Searching Microsoft Learn...</em></div>
+            </div>
+        }
+    </div>
+
+    <EditForm Model="this" OnValidSubmit="SendAsync" class="input-row">
+        <InputText @bind-Value="_input" placeholder="Ask about a Microsoft technology..." disabled="@_isThinking" class="input" />
+        <button type="submit" disabled="@(_isThinking || string.IsNullOrWhiteSpace(_input))">Send</button>
+    </EditForm>
+</div>
+
+<style>
+    .chat-container { max-width: 860px; margin: 1rem auto; font-family: system-ui, sans-serif; }
+    .subtitle { color: #666; font-size: 0.9rem; }
+    .empty { color: #999; font-style: italic; }
+    .messages { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; min-height: 400px; max-height: 60vh; overflow-y: auto; background: #fafafa; }
+    .msg { margin-bottom: 1rem; }
+    .msg .role { font-weight: bold; font-size: 0.8rem; text-transform: uppercase; color: #888; }
+    .msg.user .text { background: #d6e4ff; padding: 0.5rem 0.75rem; border-radius: 6px; display: inline-block; }
+    .msg.assistant .text { background: #fff; padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #e0e0e0; white-space: pre-wrap; }
+    .input-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+    .input { flex: 1; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 6px; }
+    button { padding: 0.5rem 1.25rem; font-size: 1rem; border: none; border-radius: 6px; background: #0066cc; color: #fff; cursor: pointer; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+</style>
+
+@code {
+    private readonly List<ChatEntry> _messages = new();
+    private AgentSession? _session;
+    private string _input = string.Empty;
+    private bool _isThinking;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _session = await Agent.CreateSessionAsync();
+    }
+
+    private async Task SendAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_input) || _isThinking || _session is null) return;
+
+        var userText = _input.Trim();
+        _input = string.Empty;
+        _messages.Add(new ChatEntry("user", userText));
+        _isThinking = true;
+
+        try
+        {
+            var response = await Agent.RunAsync(userText, _session);
+            _messages.Add(new ChatEntry("assistant", response.Text));
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(new ChatEntry("assistant", $"Error: {ex.Message}"));
+        }
+        finally
+        {
+            _isThinking = false;
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        if (_session is IAsyncDisposable d) return d.DisposeAsync();
+        return ValueTask.CompletedTask;
+    }
+
+    private record ChatEntry(string Role, string Text);
+}

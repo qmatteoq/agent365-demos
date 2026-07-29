@@ -1,0 +1,33 @@
+## .NET / Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userprefs
+
+## Rider / VS Code
+.idea/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+## Secrets & local config
+appsettings.*.local.json
+*.local.json
+.env
+*.pfx
+
+## Python (for future agents)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+## Node (for future agents)
+node_modules/
+
+## OS
+.DS_Store
+Thumbs.db
