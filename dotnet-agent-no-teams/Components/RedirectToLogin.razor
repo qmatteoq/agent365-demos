@@ -1,0 +1,11 @@
+@inject NavigationManager Navigation
+
+@code {
+    // Blazor renders this when an unauthenticated user hits an [Authorize] page. Microsoft.Identity.Web.UI
+    // owns the sign-in endpoint, so hand off to it with a redirect back to the current page.
+    protected override void OnInitialized()
+    {
+        var returnUrl = Uri.EscapeDataString(Navigation.ToBaseRelativePath(Navigation.Uri));
+        Navigation.NavigateTo($"MicrosoftIdentity/Account/SignIn?redirectUri=/{returnUrl}", forceLoad: true);
+    }
+}

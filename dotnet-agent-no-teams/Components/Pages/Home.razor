@@ -1,14 +1,31 @@
 @page "/"
 @rendermode InteractiveServer
+@using System.Security.Claims
+@using LearnMcpAgent.Agent365
 @using Microsoft.Agents.AI
+@using Microsoft.Agents.A365.Observability.Runtime.Common
+@using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts
+@using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.Identity.Web
+@attribute [Authorize]
 @inject AIAgent Agent
+@inject A365Config A365
+@inject AgentOboTokenService OboTokens
+@inject ObservabilityTokenStore TokenStore
+@inject ITokenAcquisition TokenAcquisition
+@inject MicrosoftIdentityConsentAndConditionalAccessHandler ConsentHandler
+@inject AuthenticationStateProvider AuthStateProvider
+@inject ILogger<Home> Logger
 @implements IAsyncDisposable
 
 <PageTitle>Microsoft Learn Agent</PageTitle>
 
 <div class="chat-container">
     <h1>Microsoft Learn Agent</h1>
-    <p class="subtitle">Microsoft Agent Framework (.NET) + Azure OpenAI + Microsoft Learn MCP server</p>
+    <p class="subtitle">
+        Microsoft Agent Framework (.NET) + Azure OpenAI + Microsoft Learn MCP &mdash; traced with Agent 365
+    </p>
 
     <div class="messages">
         @if (_messages.Count == 0 && !_isThinking)
@@ -35,12 +52,18 @@
         <InputText @bind-Value="_input" placeholder="Ask about a Microsoft technology..." disabled="@_isThinking" class="input" />
         <button type="submit" disabled="@(_isThinking || string.IsNullOrWhiteSpace(_input))">Send</button>
     </EditForm>
+
+    @if (_observabilityWarning is not null)
+    {
+        <p class="warn">Observability: @_observabilityWarning</p>
+    }
 </div>
 
 <style>
     .chat-container { max-width: 860px; margin: 1rem auto; font-family: system-ui, sans-serif; }
     .subtitle { color: #666; font-size: 0.9rem; }
     .empty { color: #999; font-style: italic; }
+    .warn { color: #a15c00; font-size: 0.8rem; margin-top: 0.5rem; }
     .messages { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; min-height: 400px; max-height: 60vh; overflow-y: auto; background: #fafafa; }
     .msg { margin-bottom: 1rem; }
     .msg .role { font-weight: bold; font-size: 0.8rem; text-transform: uppercase; color: #888; }
@@ -53,14 +76,25 @@
 </style>
 
 @code {
+    // Observability API — the resource the agent posts its OTLP traces to.
+    private const string ObservabilityScope = "api://9b975845-388f-4429-889e-eab1ef63949c/.default";
+
     private readonly List<ChatEntry> _messages = new();
+
+    // A web agent has no ITurnContext-supplied conversation id, so generate one per circuit and
+    // reuse it for every turn. All spans in the session then share a gen_ai.conversation.id.
+    private readonly string _conversationId = Guid.NewGuid().ToString("N");
+
     private AgentSession? _session;
     private string _input = string.Empty;
     private bool _isThinking;
+    private string? _observabilityWarning;
+    private ClaimsPrincipal? _user;
 
     protected override async Task OnInitializedAsync()
     {
         _session = await Agent.CreateSessionAsync();
+        _user = (await AuthStateProvider.GetAuthenticationStateAsync()).User;
     }
 
     private async Task SendAsync()
@@ -74,17 +108,105 @@
 
         try
         {
+            var hasObservability = await PrepareObservabilityTokenAsync();
+
+            using var baggageScope = hasObservability ? BuildBaggageScope() : null;
+            using var invokeScope = hasObservability ? StartInvokeScope(userText) : null;
+
+            invokeScope?.RecordInputMessages([userText]);
+
+            // The IChatClient is wrapped with UseOpenTelemetry, so gen_ai inference and tool spans
+            // are emitted automatically as children of this scope — no manual InferenceScope needed.
             var response = await Agent.RunAsync(userText, _session);
+
+            invokeScope?.RecordOutputMessages([response.Text]);
             _messages.Add(new ChatEntry("assistant", response.Text));
         }
         catch (Exception ex)
         {
+            Logger.LogError(ex, "Agent turn failed.");
             _messages.Add(new ChatEntry("assistant", $"Error: {ex.Message}"));
         }
         finally
         {
             _isThinking = false;
         }
+    }
+
+    // Acquires the user token for the blueprint, exchanges it through the agent OBO chain, and
+    // hands the resulting Observability API token to the exporter's token resolver.
+    private async Task<bool> PrepareObservabilityTokenAsync()
+    {
+        if (string.IsNullOrEmpty(A365.AgentIdentityClientId) || string.IsNullOrEmpty(A365.TenantId))
+        {
+            _observabilityWarning = "agent identity not configured — run 'a365 setup all'.";
+            return false;
+        }
+
+        try
+        {
+            var userAssertion = await TokenAcquisition.GetAccessTokenForUserAsync([A365.AgentUserScope]);
+            var agentToken = await OboTokens.GetAgentTokenAsync(userAssertion, ObservabilityScope);
+
+            if (string.IsNullOrEmpty(agentToken))
+            {
+                _observabilityWarning = "could not obtain an Observability API token — traces are not exported.";
+                return false;
+            }
+
+            TokenStore.Set(A365.AgentIdentityClientId, A365.TenantId, agentToken);
+            _observabilityWarning = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Consent or conditional access needs an interactive round trip.
+            ConsentHandler.HandleException(ex);
+            _observabilityWarning = $"token acquisition failed ({ex.GetType().Name}) — traces are not exported.";
+            Logger.LogWarning(ex, "Observability token acquisition failed.");
+            return false;
+        }
+    }
+
+    private IDisposable BuildBaggageScope() =>
+        new BaggageBuilder()
+            .TenantId(A365.TenantId)
+            .AgentId(A365.AgentIdentityClientId)
+            .AgentName(A365.AgentName)
+            .AgentBlueprintId(A365.BlueprintClientId)
+            .ConversationId(_conversationId)
+            .SessionId(_conversationId)
+            // Not a Teams-hosted agent — use a logical channel name for the web UI.
+            .ChannelName("web")
+            .Build();
+
+    private InvokeAgentScope StartInvokeScope(string userText)
+    {
+        var agentDetails = new AgentDetails(
+            agentId: A365.AgentIdentityClientId,
+            agentName: A365.AgentName,
+            agentDescription: "Microsoft Learn research agent",
+            agentBlueprintId: A365.BlueprintClientId,
+            tenantId: A365.TenantId);
+
+        var callerDetails = new CallerDetails(
+            userDetails: new UserDetails(
+                userId: _user?.FindFirst("oid")?.Value
+                    ?? _user?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                    ?? "unknown",
+                userName: _user?.Identity?.Name ?? "unknown",
+                userEmail: _user?.FindFirst("preferred_username")?.Value
+                    ?? _user?.FindFirst(ClaimTypes.Email)?.Value
+                    ?? string.Empty));
+
+        // Blueprint id is a GUID and therefore always URI-safe; the display name is not.
+        var endpoint = new Uri($"https://{A365.BlueprintClientId}.agent.invalid/");
+
+        return InvokeAgentScope.Start(
+            new Request(userText),
+            new InvokeAgentScopeDetails(endpoint: endpoint),
+            agentDetails,
+            callerDetails);
     }
 
     public ValueTask DisposeAsync()

@@ -15,6 +15,7 @@ obj/
 ## Secrets & local config
 appsettings.*.local.json
 *.local.json
+a365.generated.config.json
 .env
 *.pfx
 
@@ -31,3 +32,5 @@ node_modules/
 ## OS
 .DS_Store
 Thumbs.db
+
+run.log

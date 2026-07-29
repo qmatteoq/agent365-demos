@@ -1,0 +1,9 @@
+{
+  "tenantId": "57db880c-370a-428d-9139-2b346b4eb220",
+  "clientAppId": "ebde56df-388b-4dbe-bb27-aad8d552e68b",
+  "agentIdentityDisplayName": "dotnet-agent-noteams Identity",
+  "agentBlueprintDisplayName": "dotnet-agent-noteams Blueprint",
+  "agentDescription": "dotnet-agent-noteams",
+  "aiTeammate": false,
+  "useBlueprint": true
+}
