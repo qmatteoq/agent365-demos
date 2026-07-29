@@ -9,7 +9,7 @@
 @using Microsoft.AspNetCore.Authorization
 @using Microsoft.Identity.Web
 @attribute [Authorize]
-@inject AIAgent Agent
+@inject LearnAgentFactory AgentFactory
 @inject A365Config A365
 @inject AgentOboTokenService OboTokens
 @inject ObservabilityTokenStore TokenStore
@@ -85,6 +85,7 @@
     // reuse it for every turn. All spans in the session then share a gen_ai.conversation.id.
     private readonly string _conversationId = Guid.NewGuid().ToString("N");
 
+    private AIAgent? _agent;
     private AgentSession? _session;
     private string _input = string.Empty;
     private bool _isThinking;
@@ -93,13 +94,12 @@
 
     protected override async Task OnInitializedAsync()
     {
-        _session = await Agent.CreateSessionAsync();
         _user = (await AuthStateProvider.GetAuthenticationStateAsync()).User;
     }
 
     private async Task SendAsync()
     {
-        if (string.IsNullOrWhiteSpace(_input) || _isThinking || _session is null) return;
+        if (string.IsNullOrWhiteSpace(_input) || _isThinking) return;
 
         var userText = _input.Trim();
         _input = string.Empty;
@@ -108,7 +108,19 @@
 
         try
         {
-            var hasObservability = await PrepareObservabilityTokenAsync();
+            // One user token serves both purposes: it is the assertion for the observability token
+            // exchange and for the per-audience WorkIQ tokens.
+            var userAssertion = await AcquireUserAssertionAsync();
+            var hasObservability = await PrepareObservabilityTokenAsync(userAssertion);
+
+            // A365 WorkIQ — added by add-workiq-tools skill.
+            // Tools must be supplied at agent creation, and the WorkIQ tools are user-specific, so
+            // the agent is built on the first turn once the user's token is available.
+            if (_agent is null)
+            {
+                _agent = await AgentFactory.CreateAsync(userAssertion);
+                _session = await _agent.CreateSessionAsync();
+            }
 
             using var baggageScope = hasObservability ? BuildBaggageScope() : null;
             using var invokeScope = hasObservability ? StartInvokeScope(userText) : null;
@@ -117,7 +129,7 @@
 
             // The IChatClient is wrapped with UseOpenTelemetry, so gen_ai inference and tool spans
             // are emitted automatically as children of this scope — no manual InferenceScope needed.
-            var response = await Agent.RunAsync(userText, _session);
+            var response = await _agent.RunAsync(userText, _session);
 
             invokeScope?.RecordOutputMessages([response.Text]);
             _messages.Add(new ChatEntry("assistant", response.Text));
@@ -133,39 +145,50 @@
         }
     }
 
-    // Acquires the user token for the blueprint, exchanges it through the agent OBO chain, and
-    // hands the resulting Observability API token to the exporter's token resolver.
-    private async Task<bool> PrepareObservabilityTokenAsync()
+    // Requests the token whose audience is the agent blueprint. It is the user assertion for every
+    // downstream agent on-behalf-of exchange.
+    private async Task<string?> AcquireUserAssertionAsync()
     {
+        try
+        {
+            return await TokenAcquisition.GetAccessTokenForUserAsync([A365.AgentUserScope]);
+        }
+        catch (Exception ex)
+        {
+            // Consent or conditional access needs an interactive round trip.
+            ConsentHandler.HandleException(ex);
+            Logger.LogWarning(ex, "Could not acquire the user assertion for the agent blueprint.");
+            return null;
+        }
+    }
+
+    // Exchanges the user assertion through the agent OBO chain and hands the resulting
+    // Observability API token to the exporter's token resolver.
+    private async Task<bool> PrepareObservabilityTokenAsync(string? userAssertion)
+    {
+        if (string.IsNullOrEmpty(userAssertion))
+        {
+            _observabilityWarning = "no user token — traces are not exported.";
+            return false;
+        }
+
         if (string.IsNullOrEmpty(A365.AgentIdentityClientId) || string.IsNullOrEmpty(A365.TenantId))
         {
             _observabilityWarning = "agent identity not configured — run 'a365 setup all'.";
             return false;
         }
 
-        try
-        {
-            var userAssertion = await TokenAcquisition.GetAccessTokenForUserAsync([A365.AgentUserScope]);
-            var agentToken = await OboTokens.GetAgentTokenAsync(userAssertion, ObservabilityScope);
+        var agentToken = await OboTokens.GetAgentTokenAsync(userAssertion, ObservabilityScope);
 
-            if (string.IsNullOrEmpty(agentToken))
-            {
-                _observabilityWarning = "could not obtain an Observability API token — traces are not exported.";
-                return false;
-            }
-
-            TokenStore.Set(A365.AgentIdentityClientId, A365.TenantId, agentToken);
-            _observabilityWarning = null;
-            return true;
-        }
-        catch (Exception ex)
+        if (string.IsNullOrEmpty(agentToken))
         {
-            // Consent or conditional access needs an interactive round trip.
-            ConsentHandler.HandleException(ex);
-            _observabilityWarning = $"token acquisition failed ({ex.GetType().Name}) — traces are not exported.";
-            Logger.LogWarning(ex, "Observability token acquisition failed.");
+            _observabilityWarning = "could not obtain an Observability API token — traces are not exported.";
             return false;
         }
+
+        TokenStore.Set(A365.AgentIdentityClientId, A365.TenantId, agentToken);
+        _observabilityWarning = null;
+        return true;
     }
 
     private IDisposable BuildBaggageScope() =>

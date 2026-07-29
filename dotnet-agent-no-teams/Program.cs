@@ -88,6 +88,12 @@ var learnMcpClient = await McpClient.CreateAsync(learnMcpTransport);
 IList<McpClientTool> learnMcpTools = await learnMcpClient.ListToolsAsync();
 
 builder.Services.AddSingleton(learnMcpClient);
+builder.Services.AddSingleton(new LearnMcpTools(learnMcpTools));
+
+// A365 WorkIQ — added by add-workiq-tools skill.
+// The MCP servers themselves come from ToolingManifest.json (a365 develop add-mcp-servers).
+builder.Services.AddSingleton<WorkIqToolProvider>();
+builder.Services.AddSingleton<LearnAgentFactory>();
 
 // ---------------------------------------------------------------------------
 // Chat client + agent
@@ -123,37 +129,6 @@ builder.Services.AddSingleton<IChatClient>(sp =>
         .Build();
 });
 
-builder.Services.AddSingleton<AIAgent>(sp =>
-{
-    var chatClient = sp.GetRequiredService<IChatClient>();
-
-    var agentOptions = new ChatClientAgentOptions
-    {
-        Name = a365Config.AgentName,
-        ChatOptions = new ChatOptions
-        {
-            Instructions =
-                "You are a Microsoft ecosystem research assistant. You specialise in answering questions about " +
-                "Microsoft products and technologies - Azure, Microsoft 365, Power Platform, .NET, Windows, " +
-                "Microsoft Entra, Copilot, Dynamics 365 and related services.\n" +
-                "Always use the Microsoft Learn MCP tools to search and fetch authoritative documentation before " +
-                "answering, even when you believe you already know the answer. Ground every factual statement in " +
-                "the content you retrieved and cite the source URLs at the end of your answer.\n" +
-                "If the documentation does not cover the question, say so explicitly instead of guessing. " +
-                "Keep answers clear, concise and structured.",
-            Tools = [.. learnMcpTools.Cast<AITool>()],
-        },
-    };
-
-    // Pin the agent id to the A365 agent identity. Left unset, the SDK generates a fresh GUID per
-    // run and the exporter produces orphan identity groups it cannot authenticate.
-    if (!string.IsNullOrEmpty(a365Config.AgentIdentityClientId))
-    {
-        agentOptions.Id = a365Config.AgentIdentityClientId;
-    }
-
-    return new ChatClientAgent(chatClient, agentOptions);
-});
 
 var app = builder.Build();
 
