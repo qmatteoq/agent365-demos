@@ -37,13 +37,31 @@
             <div class="msg @msg.Role">
                 <div class="role">@msg.Role</div>
                 <div class="text">@msg.Text</div>
+                @if (msg.Tools.Count > 0)
+                {
+                    <div class="tools">
+                        @foreach (var tool in msg.Tools)
+                        {
+                            <span class="chip" title="@tool.ToolName">@tool.Source · @tool.ToolName</span>
+                        }
+                    </div>
+                }
             </div>
         }
         @if (_isThinking)
         {
             <div class="msg assistant">
                 <div class="role">assistant</div>
-                <div class="text"><em>Searching Microsoft Learn...</em></div>
+                <div class="text"><em>@(_currentActivity ?? "Thinking...")</em></div>
+                @if (_turnTools.Count > 0)
+                {
+                    <div class="tools">
+                        @foreach (var tool in _turnTools)
+                        {
+                            <span class="chip">@tool.Source · @tool.ToolName</span>
+                        }
+                    </div>
+                }
             </div>
         }
     </div>
@@ -69,6 +87,8 @@
     .msg .role { font-weight: bold; font-size: 0.8rem; text-transform: uppercase; color: #888; }
     .msg.user .text { background: #d6e4ff; padding: 0.5rem 0.75rem; border-radius: 6px; display: inline-block; }
     .msg.assistant .text { background: #fff; padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #e0e0e0; white-space: pre-wrap; }
+    .tools { margin-top: 0.4rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .chip { font-size: 0.72rem; background: #eef3fb; color: #21486e; border: 1px solid #c9d9ee; border-radius: 999px; padding: 0.1rem 0.55rem; font-family: ui-monospace, Consolas, monospace; }
     .input-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
     .input { flex: 1; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 6px; }
     button { padding: 0.5rem 1.25rem; font-size: 1rem; border: none; border-radius: 6px; background: #0066cc; color: #fff; cursor: pointer; }
@@ -81,6 +101,11 @@
 
     private readonly List<ChatEntry> _messages = new();
 
+    // Tools called during the turn that is currently running.
+    private readonly List<ToolInvocation> _turnTools = new();
+
+    private readonly ToolActivityReporter _toolReporter = new();
+
     // A web agent has no ITurnContext-supplied conversation id, so generate one per circuit and
     // reuse it for every turn. All spans in the session then share a gen_ai.conversation.id.
     private readonly string _conversationId = Guid.NewGuid().ToString("N");
@@ -89,13 +114,28 @@
     private AgentSession? _session;
     private string _input = string.Empty;
     private bool _isThinking;
+    private string? _currentActivity;
     private string? _observabilityWarning;
     private ClaimsPrincipal? _user;
 
     protected override async Task OnInitializedAsync()
     {
         _user = (await AuthStateProvider.GetAuthenticationStateAsync()).User;
+
+        // Every tool call is announced before it runs, so the UI reflects what the agent is really
+        // doing rather than a fixed placeholder.
+        _toolReporter.ToolInvoked += async invocation =>
+        {
+            _turnTools.Add(invocation);
+            _currentActivity = DescribeActivity(invocation);
+            await InvokeAsync(StateHasChanged);
+        };
     }
+
+    private static string DescribeActivity(ToolInvocation invocation) =>
+        invocation.Source == "Microsoft Learn"
+            ? $"Searching Microsoft Learn ({invocation.ToolName})..."
+            : $"Using {invocation.Source} ({invocation.ToolName})...";
 
     private async Task SendAsync()
     {
@@ -104,6 +144,8 @@
         var userText = _input.Trim();
         _input = string.Empty;
         _messages.Add(new ChatEntry("user", userText));
+        _turnTools.Clear();
+        _currentActivity = null;
         _isThinking = true;
 
         try
@@ -118,9 +160,14 @@
             // the agent is built on the first turn once the user's token is available.
             if (_agent is null)
             {
-                _agent = await AgentFactory.CreateAsync(userAssertion);
+                _currentActivity = "Connecting to Microsoft Learn and Microsoft 365 tools...";
+                StateHasChanged();
+
+                _agent = await AgentFactory.CreateAsync(userAssertion, _toolReporter);
                 _session = await _agent.CreateSessionAsync();
             }
+
+            _currentActivity = "Thinking...";
 
             using var baggageScope = hasObservability ? BuildBaggageScope() : null;
             using var invokeScope = hasObservability ? StartInvokeScope(userText) : null;
@@ -132,7 +179,7 @@
             var response = await _agent.RunAsync(userText, _session);
 
             invokeScope?.RecordOutputMessages([response.Text]);
-            _messages.Add(new ChatEntry("assistant", response.Text));
+            _messages.Add(new ChatEntry("assistant", response.Text) { Tools = [.. _turnTools] });
         }
         catch (Exception ex)
         {
@@ -142,6 +189,7 @@
         finally
         {
             _isThinking = false;
+            _currentActivity = null;
         }
     }
 
@@ -238,5 +286,8 @@
         return ValueTask.CompletedTask;
     }
 
-    private record ChatEntry(string Role, string Text);
+    private sealed record ChatEntry(string Role, string Text)
+    {
+        public IReadOnlyList<ToolInvocation> Tools { get; init; } = [];
+    }
 }

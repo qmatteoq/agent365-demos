@@ -36,17 +36,26 @@ public sealed class LearnAgentFactory(
     /// <summary>
     /// Creates an agent for the current user. Pass the user's access token for the blueprint app to
     /// enable WorkIQ tools; without it the agent still works with the Microsoft Learn tools only.
+    /// The reporter is notified before each tool call so the UI can show live activity.
     /// </summary>
-    public async Task<AIAgent> CreateAsync(string? userAssertion, CancellationToken cancellationToken = default)
+    public async Task<AIAgent> CreateAsync(
+        string? userAssertion,
+        ToolActivityReporter reporter,
+        CancellationToken cancellationToken = default)
     {
-        var tools = new List<AITool>(learnMcpTools.Tools);
+        var tools = new List<AITool>();
+        tools.AddRange(Wrap(learnMcpTools.Tools, "Microsoft Learn", reporter));
 
         // A365 WorkIQ — added by add-workiq-tools skill
         if (!string.IsNullOrEmpty(userAssertion))
         {
-            var workIqTools = await workIqToolProvider.GetToolsAsync(userAssertion, cancellationToken)
+            var workIqToolSets = await workIqToolProvider.GetToolsAsync(userAssertion, cancellationToken)
                 .ConfigureAwait(false);
-            tools.AddRange(workIqTools);
+
+            foreach (var toolSet in workIqToolSets)
+            {
+                tools.AddRange(Wrap(toolSet.Tools, toolSet.Source, reporter));
+            }
         }
 
         var options = new ChatClientAgentOptions
@@ -68,4 +77,10 @@ public sealed class LearnAgentFactory(
 
         return new ChatClientAgent(chatClient, options, loggerFactory);
     }
+
+    private static IEnumerable<AITool> Wrap(
+        IEnumerable<McpClientTool> tools,
+        string source,
+        ToolActivityReporter reporter) =>
+        tools.Select(tool => new ReportingAIFunction(tool, source, reporter));
 }

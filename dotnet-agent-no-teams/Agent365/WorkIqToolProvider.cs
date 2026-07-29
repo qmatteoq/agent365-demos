@@ -16,6 +16,9 @@ public sealed class WorkIqServer
     [JsonPropertyName("audience")] public string Audience { get; set; } = string.Empty;
 }
 
+/// <summary>Tools exposed by one WorkIQ MCP server, with the label shown in the chat UI.</summary>
+public sealed record WorkIqToolSet(string Source, IList<McpClientTool> Tools);
+
 /// <summary>
 /// Loads the WorkIQ MCP servers declared in <c>ToolingManifest.json</c> and connects to them
 /// on behalf of the signed-in user.
@@ -37,14 +40,15 @@ public sealed class WorkIqToolProvider(
     public IReadOnlyList<WorkIqServer> Servers => _servers.Value;
 
     /// <summary>
-    /// Connects to every configured WorkIQ server and returns their tools. A server that fails to
-    /// authenticate or respond is skipped so the agent still starts with the tools that do work.
+    /// Connects to every configured WorkIQ server and returns their tools grouped by server. A
+    /// server that fails to authenticate or respond is skipped so the agent still starts with the
+    /// tools that do work.
     /// </summary>
-    public async Task<IList<McpClientTool>> GetToolsAsync(
+    public async Task<IReadOnlyList<WorkIqToolSet>> GetToolsAsync(
         string userAssertion,
         CancellationToken cancellationToken = default)
     {
-        var tools = new List<McpClientTool>();
+        var toolSets = new List<WorkIqToolSet>();
 
         foreach (var server in Servers)
         {
@@ -79,7 +83,7 @@ public sealed class WorkIqToolProvider(
                 var serverTools = await client.ListToolsAsync(cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
 
-                tools.AddRange(serverTools);
+                toolSets.Add(new WorkIqToolSet(FriendlyName(server.Name), serverTools));
                 logger.LogInformation("WorkIQ server {Server} exposed {Count} tools: {Tools}",
                     server.Name, serverTools.Count, string.Join(", ", serverTools.Select(t => t.Name)));
             }
@@ -89,7 +93,26 @@ public sealed class WorkIqToolProvider(
             }
         }
 
-        return tools;
+        return toolSets;
+    }
+
+    // "mcp_MailTools" -> "Mail", "mcp_TeamsServer" -> "Teams" — used as the label in the chat UI.
+    private static string FriendlyName(string serverName)
+    {
+        var name = serverName.StartsWith("mcp_", StringComparison.OrdinalIgnoreCase)
+            ? serverName[4..]
+            : serverName;
+
+        foreach (var suffix in (string[])["Tools", "Server", "RemoteServer"])
+        {
+            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) && name.Length > suffix.Length)
+            {
+                name = name[..^suffix.Length];
+                break;
+            }
+        }
+
+        return name;
     }
 
     private static IReadOnlyList<WorkIqServer> LoadManifest(IWebHostEnvironment environment, ILogger logger)
