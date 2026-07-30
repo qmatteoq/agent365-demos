@@ -14,6 +14,14 @@ using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
 using OpenAI.Chat;
 
+// Two things key off "is this a local run?", and they must stay separable. The A365 Tooling SDK
+// picks DevMcpTokenProvider (which demands a hand-pasted BEARER_TOKEN) when ASPNETCORE_ENVIRONMENT
+// is exactly "Development", so exercising the real agentic WorkIQ path locally means running as
+// Production - but the credential and console-exporter choices below still need the local answer.
+// LocalRun is that separate signal: set A365_LOCAL_RUN=false only when genuinely cloud-hosted.
+var isLocalRun = !string.Equals(
+    Environment.GetEnvironmentVariable("A365_LOCAL_RUN"), "false", StringComparison.OrdinalIgnoreCase);
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient();
@@ -29,7 +37,11 @@ builder.Services.AddSingleton<IExporterTokenCache<AgenticTokenStruct>>(agenticTo
 
 builder.UseMicrosoftOpenTelemetry(o =>
 {
-    o.Exporters = builder.Environment.IsDevelopment()
+    // ExportTarget.Agent365 is unconditional - traces must always reach Agent 365, including
+    // during local testing, because that is what makes them visible in Defender and MAC Activity.
+    // A365_LOCAL_RUN only adds the console exporter on top for local diagnosis; it never removes
+    // the Agent 365 one.
+    o.Exporters = isLocalRun
         ? ExportTarget.Agent365 | ExportTarget.Console
         : ExportTarget.Agent365;
 
@@ -84,7 +96,7 @@ builder.Services.AddSingleton<IChatClient>(sp =>
         TenantId = string.IsNullOrWhiteSpace(aoaiTenantId) ? null : aoaiTenantId,
         // There is no IMDS endpoint locally; ManagedIdentityCredential can throw a fatal
         // AuthenticationFailedException that aborts the chain before the az CLI / VS credential.
-        ExcludeManagedIdentityCredential = builder.Environment.IsDevelopment(),
+        ExcludeManagedIdentityCredential = isLocalRun,
     });
 
     var azureClient = new AzureOpenAIClient(new Uri(aoaiEndpoint), credential);
