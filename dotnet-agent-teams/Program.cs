@@ -1,6 +1,7 @@
 using Azure.AI.OpenAI;
 using Azure.Identity;
 using LearnTeamsAgent.Agent;
+using LearnTeamsAgent.Observability;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
 using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
 using Microsoft.Agents.A365.Tooling.Services;
@@ -18,16 +19,19 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 
 // A365 Observability — best-effort instrumentation (verify against official sample)
-// The token cache turns the per-turn user token into an Observability API token. It is created
-// here rather than through DI so the same instance can be handed both to the agent (which
-// registers a token on every turn) and to the exporter's TokenResolver below.
-var observabilityTokenCache = new AgenticTokenCache();
-builder.Services.AddSingleton<IExporterTokenCache<AgenticTokenStruct>>(observabilityTokenCache);
+// Registers the span exporter's token cache and the background service that keeps it filled.
+// The exporter authenticates as the agent identity rather than as the signed-in user: the
+// observability backend requires the token's principal to match the agent in the export route,
+// which a delegated on-behalf-of token cannot satisfy. See ObservabilityTokenService.
+builder.Services.AddAgent365Observability();
 
 // A365 Observability — best-effort instrumentation (verify against official sample)
 // Configures the OpenTelemetry pipeline and the Agent 365 span exporter in one call. Traces are
 // exported to Agent 365 (and surface in Microsoft Defender / the Microsoft Admin Center); in
 // development they are mirrored to the console so a local run can be inspected immediately.
+// The cache is resolved after Build(), so the resolver closes over the variable rather than
+// capturing its (still null) value here.
+IExporterTokenCache<string>? observabilityTokenCache = null;
 builder.UseMicrosoftOpenTelemetry(o =>
 {
     o.Exporters = builder.Environment.IsDevelopment()
@@ -40,9 +44,14 @@ builder.UseMicrosoftOpenTelemetry(o =>
     o.Instrumentation.EnableHttpClientInstrumentation = true;
     o.Instrumentation.EnableAzureSdkInstrumentation = true;
 
-    // On-behalf-of path: the exporter posts to /observability/, which this token authenticates.
-    // UseS2SEndpoint stays at its default (false).
-    o.Agent365.TokenResolver = observabilityTokenCache.GetObservabilityToken;
+    // Service-to-service traces go to a different route than the delegated ones, and the two do
+    // not accept each other's tokens. The distro leaves this off, so it has to be set explicitly.
+    o.Agent365.UseS2SEndpoint = true;
+
+    o.Agent365.TokenResolver = async (agentId, tenantId) =>
+        observabilityTokenCache is not null
+            ? await observabilityTokenCache.GetObservabilityToken(agentId, tenantId)
+            : null;
 });
 
 var aoaiEndpoint = builder.Configuration["AzureOpenAI:Endpoint"]
@@ -141,6 +150,10 @@ builder.AddAgentApplicationOptions();
 builder.AddAgent<LearnAgent>();
 
 var app = builder.Build();
+
+// A365 Observability — best-effort instrumentation (verify against official sample)
+// Completes the exporter's token resolver now that the container exists.
+observabilityTokenCache = app.Services.GetService<IExporterTokenCache<string>>();
 
 // The Agents SDK channel endpoint. Teams, Microsoft 365 Copilot and the Agents Playground
 // all deliver activities here.

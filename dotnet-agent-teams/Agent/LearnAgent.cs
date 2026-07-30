@@ -29,7 +29,6 @@ public class LearnAgent : AgentApplication
     private readonly AIAgent _agent;
     private readonly ConversationSessionStore _sessions;
     private readonly ILogger<LearnAgent> _logger;
-    private readonly IExporterTokenCache<AgenticTokenStruct>? _tokenCache;
     private readonly IMcpToolRegistrationService _workIqTools;
     private readonly LearnMcpTools _learnTools;
     private readonly IConfiguration _configuration;
@@ -40,7 +39,6 @@ public class LearnAgent : AgentApplication
         AgentApplicationOptions options,
         AIAgent agent,
         ConversationSessionStore sessions,
-        IExporterTokenCache<AgenticTokenStruct> tokenCache,
         IMcpToolRegistrationService workIqTools,
         LearnMcpTools learnTools,
         IConfiguration configuration,
@@ -49,7 +47,6 @@ public class LearnAgent : AgentApplication
         _agent = agent;
         _sessions = sessions;
         _logger = logger;
-        _tokenCache = tokenCache;
         _workIqTools = workIqTools;
         _learnTools = learnTools;
         _configuration = configuration;
@@ -151,11 +148,6 @@ public class LearnAgent : AgentApplication
                 .Build()
             : null;
 
-        if (hasObservabilityIdentity)
-        {
-            RegisterObservabilityToken(turnContext, agentId!, tenantId!);
-        }
-
         // InvokeAgentScope emits the parent "InvokeAgent" record. Without it Advanced Hunting shows
         // only orphan inference rows and never renders the agent turn.
         using var invokeScope = hasObservabilityIdentity
@@ -217,31 +209,6 @@ public class LearnAgent : AgentApplication
                     ?? _configuration["Agent365Observability:TenantId"];
 
         return (agentId, tenantId);
-    }
-
-    // A365 Observability — best-effort instrumentation (verify against official sample)
-    private void RegisterObservabilityToken(ITurnContext turnContext, string agentId, string tenantId)
-    {
-        try
-        {
-            var authHandlerName = turnContext.Activity.IsAgenticRequest()
-                ? _agenticAuthHandlerName
-                : _oboAuthHandlerName ?? _agenticAuthHandlerName;
-
-            _tokenCache?.RegisterObservability(
-                agentId,
-                tenantId,
-                new AgenticTokenStruct(
-                    UserAuthorization,
-                    turnContext,
-                    authHandlerName ?? string.Empty,
-                    string.Empty),
-                EnvironmentUtils.GetObservabilityAuthenticationScope());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to register the Agent 365 observability token.");
-        }
     }
 
     // A365 Observability — best-effort instrumentation (verify against official sample)
