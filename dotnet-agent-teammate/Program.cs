@@ -24,6 +24,16 @@ var isLocalRun = !string.Equals(
 
 var builder = WebApplication.CreateBuilder(args);
 
+// CreateBuilder only adds the user-secrets provider when the environment is Development, and this
+// agent deliberately runs as Production (see above) with the blueprint client secret in user
+// secrets rather than in the tracked appsettings.json. Without this the ServiceConnection is built
+// with an empty ClientSecret and every turn fails with "Failed to create authentication provider
+// for connection name ''". Local runs only - a cloud host supplies the secret by other means.
+if (isLocalRun)
+{
+    builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+}
+
 builder.Services.AddHttpClient();
 builder.Services.AddHttpContextAccessor();
 
