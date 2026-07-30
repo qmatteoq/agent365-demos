@@ -8,7 +8,7 @@ using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
 using Microsoft.Agents.A365.Runtime.Utils;
 // A365 WorkIQ - added by add-workiq-tools skill
-using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
+using LearnTeammateAgent.Agent365;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App;
@@ -45,8 +45,8 @@ public class LearnAgent : AgentApplication
     private readonly LearnAgentFactory _agentFactory;
     private readonly ConversationSessionStore _sessions;
     private readonly IExporterTokenCache<AgenticTokenStruct>? _tokenCache;
-    // A365 WorkIQ - added by add-workiq-tools skill
-    private readonly IMcpToolRegistrationService? _workIqTools;
+    // A365 WorkIQ - added by add-workiq-tools skill, rewired onto the direct provider
+    private readonly WorkIqToolProvider? _workIq;
     private readonly IConfiguration _configuration;
     private readonly ILogger<LearnAgent> _logger;
     private readonly string? _agenticAuthHandlerName;
@@ -57,14 +57,14 @@ public class LearnAgent : AgentApplication
         LearnAgentFactory agentFactory,
         ConversationSessionStore sessions,
         IExporterTokenCache<AgenticTokenStruct> tokenCache,
-        IMcpToolRegistrationService workIqTools,
+        WorkIqToolProvider workIq,
         IConfiguration configuration,
         ILogger<LearnAgent> logger) : base(options)
     {
         _agentFactory = agentFactory;
         _sessions = sessions;
         _tokenCache = tokenCache;
-        _workIqTools = workIqTools;
+        _workIq = workIq;
         _configuration = configuration;
         _logger = logger;
 
@@ -361,11 +361,11 @@ public class LearnAgent : AgentApplication
     /// Returns null when WorkIQ is unavailable, so the turn still runs on Microsoft Learn alone.
     /// </summary>
     /// <remarks>
-    /// A365 WorkIQ - added by add-workiq-tools skill.
-    /// Failure here is deliberately non-fatal. <c>GetMcpToolsAsync</c> first asks the tooling
-    /// gateway which servers this agent may use, at <c>/agents/v2/{agentId}/mcpServers</c>, and
-    /// that route is currently returning 500 for the other Teams agent in this repository. If it
-    /// fails the same way here, the agent degrades to Learn-only rather than failing the turn.
+    /// A365 WorkIQ - added by add-workiq-tools skill, then rewired onto <see cref="WorkIqToolProvider"/>.
+    /// The SDK's <c>GetMcpToolsAsync</c> cannot run in this project: it is compiled against
+    /// ModelContextProtocol.Core 0.2.0-preview.3 and calls <c>IMcpClient</c>, a type 1.3.0 removed,
+    /// so it throws TypeLoadException at runtime. See WorkIqToolProvider for the full reasoning.
+    /// Failure here stays non-fatal - the agent degrades to Learn-only rather than failing the turn.
     /// </remarks>
     private async Task<AgentRunOptions?> BuildWorkIqRunOptionsAsync(
         ITurnContext turnContext,
@@ -373,19 +373,17 @@ public class LearnAgent : AgentApplication
         string? authHandlerName,
         CancellationToken cancellationToken)
     {
-        if (_workIqTools is null
-            || string.IsNullOrEmpty(resolvedAgentId)
-            || string.IsNullOrEmpty(authHandlerName))
+        if (_workIq is null || string.IsNullOrEmpty(resolvedAgentId) || string.IsNullOrEmpty(authHandlerName))
         {
-            // No agent identity or no auth handler means no delegated token can be obtained,
-            // which is the normal state in the Agents Playground.
+            // No agent identity (or no agentic auth handler) means no token can be obtained for the
+            // WorkIQ audiences, which is the normal state in the Agents Playground.
             return null;
         }
 
         try
         {
-            var tools = await _workIqTools
-                .GetMcpToolsAsync(resolvedAgentId, UserAuthorization, authHandlerName, turnContext)
+            var tools = await _workIq
+                .GetToolsAsync(UserAuthorization, turnContext, authHandlerName, cancellationToken)
                 .ConfigureAwait(false);
 
             if (tools is null || tools.Count == 0)
