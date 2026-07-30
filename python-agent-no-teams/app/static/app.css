@@ -1,0 +1,69 @@
+body { margin: 0; background: #fff; }
+
+.chat-container {
+    max-width: 860px;
+    margin: 1rem auto;
+    font-family: system-ui, sans-serif;
+    padding: 0 1rem;
+}
+
+.subtitle { color: #666; font-size: 0.9rem; }
+.status { color: #999; font-size: 0.8rem; min-height: 1.2em; }
+.empty { color: #999; font-style: italic; }
+
+.messages {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 1rem;
+    min-height: 400px;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: #fafafa;
+}
+
+.msg { margin-bottom: 1rem; }
+
+.msg .role {
+    font-weight: bold;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    color: #888;
+}
+
+.msg.user .text {
+    background: #d6e4ff;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    display: inline-block;
+}
+
+.msg.assistant .text {
+    background: #fff;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    white-space: pre-wrap;
+}
+
+.input-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+
+.input {
+    flex: 1;
+    padding: 0.5rem;
+    font-size: 1rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+}
+
+button {
+    padding: 0.5rem 1.25rem;
+    font-size: 1rem;
+    border: none;
+    border-radius: 6px;
+    background: #0066cc;
+    color: #fff;
+    cursor: pointer;
+}
+
+button.secondary { background: #6c757d; }
+button:disabled { background: #aaa; cursor: not-allowed; }
