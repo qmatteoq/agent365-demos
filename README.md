@@ -13,6 +13,7 @@ technology used to build the agent.
 | --- | --- | --- |
 | [`dotnet-agent-no-teams`](./dotnet-agent-no-teams) | Microsoft Agent Framework (.NET) + Azure OpenAI | Blazor Server web app, no Teams |
 | [`dotnet-agent-teams`](./dotnet-agent-teams) | Microsoft 365 Agents SDK (.NET) + Agent Framework + Azure OpenAI | Custom engine agent in Microsoft Teams / M365 Copilot |
+| [`python-agent-no-teams`](./python-agent-no-teams) | LangChain (Python) + Azure OpenAI | FastAPI web app, no Teams |
 
 ## Branching model
 
@@ -25,6 +26,7 @@ technology used to build the agent.
 | `a365/dotnet-agent-no-teams` | `dotnet-agent-no-teams`, after onboarding (merged into `main`) |
 | `plain/teams-agent` | `dotnet-agent-teams`, before onboarding |
 | `a365/teams-agent` | `dotnet-agent-teams`, after onboarding (merged into `main`) |
+| `plain/python-agent-no-teams` | `python-agent-no-teams`, before onboarding |
 
 This makes the onboarding work visible as a diff:
 
@@ -45,10 +47,11 @@ it depends on, and attach the debugger.
 | --- | --- | --- |
 | `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
 | `dotnet-agent-teams` | Builds, brings the dev tunnel up, then starts the agent on port 3978 | Teams, once the agent is listening |
+| `python-agent-no-teams` | Syncs dependencies, starts the app, then opens the browser | <http://127.0.0.1:8000> |
 
-Both run with `ASPNETCORE_ENVIRONMENT=Development`, which is what makes **user secrets** load.
-Neither agent can authenticate without them, so if a fresh clone fails at startup, check that they
-are set:
+The two .NET agents run with `ASPNETCORE_ENVIRONMENT=Development`, which is what makes **user
+secrets** load. Neither can authenticate without them, so if a fresh clone fails at startup, check
+that they are set:
 
 ```powershell
 dotnet user-secrets list
@@ -57,6 +60,9 @@ dotnet user-secrets list
 Neither agent has an `appsettings.Development.json` disabling the Agent 365 exporter, so an F5 run
 exports traces to Agent 365 exactly like a production run. That is deliberate: it is the point of
 the demo.
+
+The Python agent reads its configuration from `.env` instead; see
+[`python-agent-no-teams/README.md`](./python-agent-no-teams/README.md).
 
 ### The Teams agent's dev tunnel
 
@@ -82,12 +88,12 @@ you started from a terminal, so close that one first to avoid two relays forward
 
 ## Agent 365 capabilities per agent
 
-| Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` |
-| --- | --- | --- |
-| Agent identity and blueprint | Yes | Yes |
-| Observability instrumentation | Yes | Yes, exported service-to-service |
-| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below |
-| User authentication | Not applicable, no user context | On-Behalf-Of through Teams SSO |
+| Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `python-agent-no-teams` |
+| --- | --- | --- | --- |
+| Agent identity and blueprint | Yes | Yes | Not yet onboarded |
+| Observability instrumentation | Yes | Yes, exported service-to-service | Not yet onboarded |
+| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | Not yet onboarded |
+| User authentication | Not applicable, no user context | On-Behalf-Of through Teams SSO | Not yet onboarded |
 
 ### How the Teams agent authenticates
 

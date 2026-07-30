@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Microsoft Learn Agent</title>
+    <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+    <div class="chat-container">
+        <div class="topbar">
+            <div>
+                <h1>Microsoft Learn Agent</h1>
+                <p class="subtitle">LangChain (Python) + Azure OpenAI + Microsoft Learn MCP server</p>
+            </div>
+            <div class="account" id="account"></div>
+        </div>
+
+        <div class="messages" id="messages">
+            <p class="empty" id="empty">Ask me anything about Azure, Microsoft 365, .NET, Power Platform or any other Microsoft technology.</p>
+        </div>
+
+        <form class="input-row" id="chat-form">
+            <input class="input" id="input" autocomplete="off"
+                   placeholder="Ask about a Microsoft technology..." />
+            <button type="submit" id="send">Send</button>
+            <button type="button" id="reset" class="secondary">New chat</button>
+        </form>
+
+        <p class="status" id="status"></p>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
