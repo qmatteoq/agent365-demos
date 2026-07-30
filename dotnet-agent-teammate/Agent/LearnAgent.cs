@@ -2,11 +2,17 @@ using System.Text;
 using System.Text.RegularExpressions;
 using AgentNotification;
 using Microsoft.Agents.A365.Notifications.Models;
+using Microsoft.Agents.A365.Observability.Hosting.Caching;
+using Microsoft.Agents.A365.Observability.Runtime.Common;
+using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
+using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
+using Microsoft.Agents.A365.Runtime.Utils;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App;
 using Microsoft.Agents.Builder.State;
 using Microsoft.Agents.Core.Models;
+using ObsRequest = Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts.Request;
 
 namespace LearnTeammateAgent.Agent;
 
@@ -34,28 +40,35 @@ public class LearnAgent : AgentApplication
     /// <summary>Teams expires a typing indicator after about 5 seconds, so refresh inside that window.</summary>
     private static readonly TimeSpan TypingInterval = TimeSpan.FromSeconds(4);
 
-    private readonly AIAgent _agent;
+    private readonly LearnAgentFactory _agentFactory;
     private readonly ConversationSessionStore _sessions;
+    private readonly IExporterTokenCache<AgenticTokenStruct>? _tokenCache;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<LearnAgent> _logger;
+    private readonly string? _agenticAuthHandlerName;
+    private readonly string? _oboAuthHandlerName;
 
     public LearnAgent(
         AgentApplicationOptions options,
-        AIAgent agent,
+        LearnAgentFactory agentFactory,
         ConversationSessionStore sessions,
+        IExporterTokenCache<AgenticTokenStruct> tokenCache,
         IConfiguration configuration,
         ILogger<LearnAgent> logger) : base(options)
     {
-        _agent = agent;
+        _agentFactory = agentFactory;
         _sessions = sessions;
+        _tokenCache = tokenCache;
+        _configuration = configuration;
         _logger = logger;
 
         // Handler names come from configuration, not constants, so the same binary runs
         // unauthenticated in the Agents Playground and agentic in Teams.
-        var agenticHandlerName = configuration.GetValue<string>("AgentApplication:AgenticAuthHandlerName");
-        var oboHandlerName = configuration.GetValue<string>("AgentApplication:OboAuthHandlerName");
+        _agenticAuthHandlerName = configuration.GetValue<string>("AgentApplication:AgenticAuthHandlerName");
+        _oboAuthHandlerName = configuration.GetValue<string>("AgentApplication:OboAuthHandlerName");
 
-        string[] agenticHandlers = string.IsNullOrWhiteSpace(agenticHandlerName) ? [] : [agenticHandlerName];
-        string[] oboHandlers = string.IsNullOrWhiteSpace(oboHandlerName) ? [] : [oboHandlerName];
+        string[] agenticHandlers = string.IsNullOrWhiteSpace(_agenticAuthHandlerName) ? [] : [_agenticAuthHandlerName];
+        string[] oboHandlers = string.IsNullOrWhiteSpace(_oboAuthHandlerName) ? [] : [_oboAuthHandlerName];
 
         // Without this, an exception escaping the turn pipeline bubbles out of ProcessAsync
         // and the channel sees an opaque 500 with no reply to the user.
@@ -217,6 +230,7 @@ public class LearnAgent : AgentApplication
     /// <summary>
     /// Runs the question through the agent while keeping a typing indicator alive, since
     /// researching on Microsoft Learn routinely takes longer than the channel's timeout.
+    /// The call is wrapped in the Agent 365 observability context so the turn is traceable.
     /// </summary>
     private async Task<string> ResearchAsync(
         ITurnContext turnContext,
@@ -224,20 +238,99 @@ public class LearnAgent : AgentApplication
         string question,
         CancellationToken cancellationToken)
     {
+        // A365 Observability - best-effort instrumentation (verify against official sample)
+        // A365 auth mode: agentic-user - the AI Teammate acts as its own identity, so the agent id
+        // is the agentic instance id from the activity rather than anything decoded from a user token.
+        var isAgentic = turnContext.Activity.IsAgenticRequest();
+        var authHandlerName = isAgentic ? _agenticAuthHandlerName : _oboAuthHandlerName;
+
+        string? resolvedAgentId = null;
+        if (isAgentic)
+        {
+            resolvedAgentId = turnContext.Activity.GetAgenticInstanceId();
+        }
+        else if (!string.IsNullOrEmpty(authHandlerName))
+        {
+            try
+            {
+                var authToken = await UserAuthorization
+                    .GetTurnTokenAsync(turnContext, authHandlerName, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!string.IsNullOrEmpty(authToken))
+                {
+                    resolvedAgentId = Utility.ResolveAgentIdentity(turnContext, authToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not resolve agent id from the auth token; observability skipped for this turn.");
+            }
+        }
+
+        var resolvedTenantId = turnContext.Activity.Conversation?.TenantId
+            ?? turnContext.Activity.Recipient?.TenantId;
+
+        // Without a real (agent, tenant) pair the exporter cannot obtain a token, so it is better to
+        // export nothing than to invent an identity and emit spans that can never be authenticated.
+        var hasObservabilityIdentity = !string.IsNullOrEmpty(resolvedAgentId)
+            && !string.IsNullOrEmpty(resolvedTenantId);
+
+        if (!hasObservabilityIdentity)
+        {
+            _logger.LogDebug("No Agent 365 identity on this turn; running without observability.");
+        }
+
+        using IDisposable? baggageScope = hasObservabilityIdentity
+            ? new BaggageBuilder()
+                .TenantId(resolvedTenantId!)
+                .AgentId(resolvedAgentId!)
+                .Build()
+            : null;
+
+        if (hasObservabilityIdentity)
+        {
+            try
+            {
+                _tokenCache?.RegisterObservability(
+                    resolvedAgentId!,
+                    resolvedTenantId!,
+                    new AgenticTokenStruct(
+                        userAuthorization: UserAuthorization,
+                        turnContext: turnContext,
+                        authHandlerName: authHandlerName ?? string.Empty),
+                    EnvironmentUtils.GetObservabilityAuthenticationScope());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to register the observability token.");
+            }
+        }
+
+        var invokeScope = hasObservabilityIdentity
+            ? StartInvokeScope(turnContext, question, resolvedAgentId!, resolvedTenantId!)
+            : null;
+
         using var typingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var typingTask = KeepTypingAsync(turnContext, typingCts.Token);
 
         try
         {
-            var session = await _sessions.GetOrCreateAsync(conversationId, cancellationToken);
-            var response = await _agent.RunAsync(question, session, cancellationToken: cancellationToken);
+            var agent = _agentFactory.Get(resolvedAgentId);
+            var session = await _sessions.GetOrCreateAsync(agent, conversationId, cancellationToken);
+            var response = await agent.RunAsync(question, session, cancellationToken: cancellationToken);
 
-            return string.IsNullOrWhiteSpace(response.Text)
+            var answer = string.IsNullOrWhiteSpace(response.Text)
                 ? "I couldn't find an answer to that in the Microsoft Learn documentation."
                 : response.Text;
+
+            invokeScope?.RecordOutputMessages([answer]);
+            return answer;
         }
         finally
         {
+            invokeScope?.Dispose();
+
             await typingCts.CancelAsync();
             try
             {
@@ -248,6 +341,70 @@ public class LearnAgent : AgentApplication
                 // Expected - the loop is cancelled as soon as the answer is ready.
             }
         }
+    }
+
+    /// <summary>
+    /// Opens the InvokeAgent scope that the Defender portal uses as the parent record for a turn.
+    /// Without it, Advanced Hunting shows only orphan inference and tool rows.
+    /// </summary>
+    private InvokeAgentScope StartInvokeScope(
+        ITurnContext turnContext,
+        string question,
+        string resolvedAgentId,
+        string resolvedTenantId)
+    {
+        // A365 Observability - best-effort instrumentation (verify against official sample)
+        var obsConfig = _configuration.GetSection("Agent365Observability");
+
+        // AgentId is the agentic instance and groups activity per installed teammate;
+        // AgentBlueprintId rolls that activity up to the blueprint. The .NET recipient carries no
+        // blueprint field, so the blueprint id has to come from config.
+        var blueprintId = obsConfig["AgentBlueprintId"] ?? string.Empty;
+        if (string.IsNullOrEmpty(blueprintId))
+        {
+            _logger.LogWarning(
+                "Agent365Observability:AgentBlueprintId is empty - Defender will show per-instance " +
+                "activity with no blueprint roll-up. Set it from a365.generated.config.json.");
+        }
+
+        var agentDetails = new AgentDetails(
+            agentId: resolvedAgentId,
+            agentName: obsConfig["AgentName"] ?? "LearnTeammateAgent",
+            agentDescription: obsConfig["AgentDescription"] ?? string.Empty,
+            agentBlueprintId: blueprintId,
+            tenantId: resolvedTenantId);
+
+        var from = turnContext.Activity?.From;
+        var callerDetails = new CallerDetails(
+            userDetails: new UserDetails(
+                userId: from?.AadObjectId ?? from?.Id ?? "unknown",
+                userName: from?.Name ?? "unknown",
+                // A 1:1 Teams chat carries an MRI rather than a UPN; email and mention turns do
+                // carry one, so only set the tag when the value really is an address.
+                userEmail: from?.Id is { } id && id.Contains('@') ? id : string.Empty));
+
+        var conversationId = turnContext.Activity?.Conversation?.Id ?? "unknown";
+
+        var scopeRequest = new ObsRequest(
+            content: question,
+            sessionId: conversationId,
+            channel: new Channel(turnContext.Activity?.ChannelId ?? "msteams"),
+            conversationId: conversationId);
+
+        // Metadata only. Built from the blueprint GUID under the reserved .invalid TLD, because
+        // slugifying a free-form display name risks UriFormatException.
+        var endpointUri = !string.IsNullOrEmpty(blueprintId)
+            ? new Uri($"https://{blueprintId}.agent.invalid/")
+            : new Uri("https://agent.invalid/");
+
+        var scope = InvokeAgentScope.Start(
+            request: scopeRequest,
+            scopeDetails: new InvokeAgentScopeDetails(endpoint: endpointUri),
+            agentDetails: agentDetails,
+            callerDetails: callerDetails);
+
+        scope.RecordInputMessages([question]);
+        return scope;
     }
 
     private async Task KeepTypingAsync(ITurnContext turnContext, CancellationToken cancellationToken)

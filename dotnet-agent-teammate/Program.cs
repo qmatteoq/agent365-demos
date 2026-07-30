@@ -5,7 +5,9 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Hosting.AspNetCore;
 using Microsoft.Agents.Storage;
+using Microsoft.Agents.A365.Observability.Hosting.Caching;
 using Microsoft.Extensions.AI;
+using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
 using OpenAI.Chat;
 
@@ -13,6 +15,38 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient();
 builder.Services.AddHttpContextAccessor();
+
+// A365 Observability - best-effort instrumentation (verify against official sample)
+// The token cache is created up front so it can be both injected into LearnAgent (which deposits
+// a token per turn) and read by the exporter's resolver below. Contrary to the skill reference,
+// UseMicrosoftOpenTelemetry does NOT register IExporterTokenCache<AgenticTokenStruct> itself in
+// Microsoft.OpenTelemetry 1.0.7 - without this the host fails to start.
+var agenticTokenCache = new AgenticTokenCache();
+builder.Services.AddSingleton<IExporterTokenCache<AgenticTokenStruct>>(agenticTokenCache);
+
+builder.UseMicrosoftOpenTelemetry(o =>
+{
+    o.Exporters = builder.Environment.IsDevelopment()
+        ? ExportTarget.Agent365 | ExportTarget.Console
+        : ExportTarget.Agent365;
+
+    // The console metric exporter dumps every histogram bucket on a timer, drowning out the
+    // spans we care about. Traces and logs still reach Agent 365.
+    o.Instrumentation.EnableMetrics = false;
+
+    // Agent365-only export suppresses infrastructure instrumentation by default. Re-enable it so
+    // the outbound calls to Azure OpenAI, Entra and Learn appear in the trace.
+    o.Instrumentation.EnableAspNetCoreInstrumentation = true;
+    o.Instrumentation.EnableHttpClientInstrumentation = true;
+    o.Instrumentation.EnableAzureSdkInstrumentation = true;
+
+    // The exporter flushes on a background loop with no turn context, so it reads the token the
+    // agent deposited for this (agent, tenant) pair.
+    o.Agent365.TokenResolver = (agentId, tenantId) =>
+        agenticTokenCache.GetObservabilityToken(agentId, tenantId);
+
+    // The agentic-user path posts to /observability/ - leave UseS2SEndpoint at its default.
+});
 
 var aoaiEndpoint = builder.Configuration["AzureOpenAI:Endpoint"]
     ?? throw new InvalidOperationException("AzureOpenAI:Endpoint is not configured.");
@@ -35,8 +69,9 @@ var learnMcpClient = await McpClient.CreateAsync(learnMcpTransport);
 IList<McpClientTool> learnMcpTools = await learnMcpClient.ListToolsAsync();
 
 builder.Services.AddSingleton(learnMcpClient);
+builder.Services.AddSingleton(new LearnMcpTools(learnMcpTools));
 
-builder.Services.AddSingleton<AIAgent>(sp =>
+builder.Services.AddSingleton<IChatClient>(sp =>
 {
     // Pin DefaultAzureCredential to the resource's tenant, otherwise it may pick up an identity
     // from a different tenant and Azure OpenAI returns HTTP 400
@@ -51,20 +86,19 @@ builder.Services.AddSingleton<AIAgent>(sp =>
 
     var azureClient = new AzureOpenAIClient(new Uri(aoaiEndpoint), credential);
 
-    return azureClient.GetChatClient(aoaiDeployment).AsAIAgent(
-        instructions:
-            "You are a Microsoft ecosystem research assistant running inside Microsoft Teams and Microsoft 365 Copilot. " +
-            "You specialise in answering questions about Microsoft products and technologies - Azure, Microsoft 365, " +
-            "Power Platform, .NET, Windows, Microsoft Entra, Copilot, Dynamics 365 and related services.\n" +
-            "Always use the Microsoft Learn MCP tools to search and fetch authoritative documentation before " +
-            "answering, even when you believe you already know the answer. Ground every factual statement in " +
-            "the content you retrieved and cite the source URLs at the end of your answer.\n" +
-            "If the documentation does not cover the question, say so explicitly instead of guessing. " +
-            "Keep answers clear, concise and structured. Use short paragraphs and bullet lists, because long " +
-            "answers are hard to read in a chat window.",
-        name: "LearnTeammateAgent",
-        tools: learnMcpTools.Cast<AITool>().ToList());
+    // A365 Observability - best-effort instrumentation (verify against official sample)
+    // UseFunctionInvocation adds tool-call interception (ExecuteToolBySDK spans) and
+    // UseOpenTelemetry emits the gen_ai.inference / gen_ai.tool spans that InvokeAgentScope
+    // anchors as children. Without this the agent span has no LLM children in Defender.
+    return azureClient.GetChatClient(aoaiDeployment)
+        .AsIChatClient()
+        .AsBuilder()
+        .UseFunctionInvocation()
+        .UseOpenTelemetry(configure: cfg => cfg.EnableSensitiveData = true)
+        .Build();
 });
+
+builder.Services.AddSingleton<LearnAgentFactory>();
 
 // Conversation sessions are kept per Teams conversation so the agent has multi-turn memory.
 builder.Services.AddSingleton<ConversationSessionStore>();
