@@ -10,6 +10,8 @@
   <ItemGroup>
     <PackageReference Include="Azure.AI.OpenAI" Version="2.9.0-beta.1" />
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Microsoft.Agents.A365.Notifications" Version="1.0.0" />
+    <PackageReference Include="Microsoft.Agents.A365.Runtime" Version="1.0.0" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.6.1" />
     <PackageReference Include="Microsoft.Agents.Authentication.Msal" Version="1.7.123" />
     <PackageReference Include="Microsoft.Agents.Hosting.AspNetCore" Version="1.7.123" />

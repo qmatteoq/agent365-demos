@@ -12,6 +12,7 @@ using OpenAI.Chat;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient();
+builder.Services.AddHttpContextAccessor();
 
 var aoaiEndpoint = builder.Configuration["AzureOpenAI:Endpoint"]
     ?? throw new InvalidOperationException("AzureOpenAI:Endpoint is not configured.");
@@ -69,10 +70,20 @@ builder.Services.AddSingleton<AIAgent>(sp =>
 builder.Services.AddSingleton<ConversationSessionStore>();
 
 builder.Services.AddSingleton<IStorage, MemoryStorage>();
+
 builder.AddAgentApplicationOptions();
 builder.AddAgent<LearnAgent>();
 
 var app = builder.Build();
+
+// A liveness probe for dev tunnels and cloud hosts. Deliberately mapped outside the
+// channel endpoint so a health check never needs a channel token.
+app.MapGet("/api/health", () => Results.Ok(new
+{
+    status = "healthy",
+    agent = "LearnTeammateAgent",
+    timestamp = DateTimeOffset.UtcNow,
+}));
 
 // The Agents SDK channel endpoint. Teams, Microsoft 365 Copilot and the Agents Playground
 // all deliver activities here.
