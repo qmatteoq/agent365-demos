@@ -27,12 +27,14 @@ technology used to build the agent.
 | `plain/teams-agent` | `dotnet-agent-teams`, before onboarding |
 | `a365/teams-agent` | `dotnet-agent-teams`, after onboarding (merged into `main`) |
 | `plain/python-agent-no-teams` | `python-agent-no-teams`, before onboarding |
+| `a365/python-agent-no-teams` | `python-agent-no-teams`, after onboarding (merged into `main`) |
 
 This makes the onboarding work visible as a diff:
 
 ```powershell
 git diff plain/dotnet-agent-no-teams..main -- dotnet-agent-no-teams
 git diff plain/teams-agent..main -- dotnet-agent-teams
+git diff plain/python-agent-no-teams..main -- python-agent-no-teams
 ```
 
 Switch to a `plain/*` branch to demo the "before" state, switch back to `main` for the "after".
@@ -47,7 +49,7 @@ it depends on, and attach the debugger.
 | --- | --- | --- |
 | `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
 | `dotnet-agent-teams` | Builds, brings the dev tunnel up, then starts the agent on port 3978 | Teams, once the agent is listening |
-| `python-agent-no-teams` | Syncs dependencies, starts the app, then opens the browser | <http://127.0.0.1:8000> |
+| `python-agent-no-teams` | Syncs dependencies, starts the app, then opens the browser | <http://localhost:8000> |
 
 The two .NET agents run with `ASPNETCORE_ENVIRONMENT=Development`, which is what makes **user
 secrets** load. Neither can authenticate without them, so if a fresh clone fails at startup, check
@@ -90,10 +92,10 @@ you started from a terminal, so close that one first to avoid two relays forward
 
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `python-agent-no-teams` |
 | --- | --- | --- | --- |
-| Agent identity and blueprint | Yes | Yes | Not yet onboarded |
-| Observability instrumentation | Yes | Yes, exported service-to-service | Not yet onboarded |
-| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | Not yet onboarded |
-| User authentication | Not applicable, no user context | On-Behalf-Of through Teams SSO | Not yet onboarded |
+| Agent identity and blueprint | Yes | Yes | Yes |
+| Observability instrumentation | Yes | Yes, exported service-to-service | Yes, exported on-behalf-of |
+| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | No |
+| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | Sign-in through a separate web client app |
 
 ### How the Teams agent authenticates
 
