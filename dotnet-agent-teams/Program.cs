@@ -88,9 +88,12 @@ builder.Services.AddSingleton<IChatClient>(sp =>
     var credential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
     {
         TenantId = string.IsNullOrWhiteSpace(aoaiTenantId) ? null : aoaiTenantId,
-        // There is no IMDS endpoint locally; ManagedIdentityCredential can throw a fatal
-        // AuthenticationFailedException that aborts the chain before the az CLI / VS credential.
-        ExcludeManagedIdentityCredential = builder.Environment.IsDevelopment(),
+        // Managed identity only exists on Azure infrastructure. Off Azure there is no IMDS endpoint
+        // and ManagedIdentityCredential throws a fatal AuthenticationFailedException that aborts the
+        // chain before the az CLI / Visual Studio credential is ever tried. The ASPNETCORE_ENVIRONMENT
+        // name is the wrong signal for this, because the agent runs in Production locally whenever it
+        // is exposed to Teams through a dev tunnel. Opt in explicitly when deploying to Azure.
+        ExcludeManagedIdentityCredential = !builder.Configuration.GetValue("AzureOpenAI:UseManagedIdentity", false),
     });
 
     var azureClient = new AzureOpenAIClient(new Uri(aoaiEndpoint), credential);
