@@ -1,6 +1,7 @@
 using Azure.AI.OpenAI;
 using Azure.Identity;
 using LearnTeamsAgent.Agent;
+using LearnTeamsAgent.Agent365;
 using LearnTeamsAgent.Observability;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
 using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
@@ -82,6 +83,14 @@ builder.Services.AddSingleton(new LearnMcpTools(learnMcpTools.Cast<AITool>().ToL
 // token for one token per tool audience. Singleton to match AgentApplication's singleton host.
 builder.Services.AddSingleton<IMcpToolServerConfigurationService, McpToolServerConfigurationService>();
 builder.Services.AddSingleton<IMcpToolRegistrationService, McpToolRegistrationService>();
+
+// The SDK registration above is kept so the tooling extension stays wired, but the agent resolves
+// its WorkIQ tools through the provider below instead. The SDK first calls the tooling gateway at
+// /agents/v2/{agentId}/mcpServers to discover the servers, and that route is failing service side
+// with a 500 for any agent id. The servers themselves respond normally, so the provider skips
+// discovery and connects to the urls already present in ToolingManifest.json.
+builder.Services.AddSingleton<WorkIqTokenService>();
+builder.Services.AddSingleton<WorkIqToolProvider>();
 
 const string AgentInstructions = AgentDefaults.Instructions;
 

@@ -3,6 +3,7 @@ using Microsoft.Agents.A365.Observability.Runtime.Common;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
 using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
+using LearnTeamsAgent.Agent365;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App;
@@ -29,7 +30,7 @@ public class LearnAgent : AgentApplication
     private readonly AIAgent _agent;
     private readonly ConversationSessionStore _sessions;
     private readonly ILogger<LearnAgent> _logger;
-    private readonly IMcpToolRegistrationService _workIqTools;
+    private readonly WorkIqToolProvider _workIqTools;
     private readonly LearnMcpTools _learnTools;
     private readonly IConfiguration _configuration;
     private readonly string? _agenticAuthHandlerName;
@@ -39,7 +40,7 @@ public class LearnAgent : AgentApplication
         AgentApplicationOptions options,
         AIAgent agent,
         ConversationSessionStore sessions,
-        IMcpToolRegistrationService workIqTools,
+        WorkIqToolProvider workIqTools,
         LearnMcpTools learnTools,
         IConfiguration configuration,
         ILogger<LearnAgent> logger) : base(options)
@@ -282,18 +283,31 @@ public class LearnAgent : AgentApplication
             ? _agenticAuthHandlerName
             : _oboAuthHandlerName ?? _agenticAuthHandlerName;
 
-        if (!string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(handlerName))
+        if (!string.IsNullOrEmpty(handlerName))
         {
             try
             {
-                var workIqTools = await _workIqTools
-                    .GetMcpToolsAsync(agentId, UserAuthorization, handlerName, turnContext)
+                // The WorkIQ servers require a delegated token carrying Tools.ListInvoke.All, so the
+                // turn's user token is the starting point for every exchange the provider performs.
+                var userAssertion = await UserAuthorization
+                    .GetTurnTokenAsync(turnContext, handlerName, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
 
-                if (workIqTools is { Count: > 0 })
+                if (string.IsNullOrEmpty(userAssertion))
                 {
-                    tools.AddRange(workIqTools);
-                    _logger.LogInformation("Added {Count} WorkIQ tools for this turn.", workIqTools.Count);
+                    _logger.LogInformation("No user token this turn; answering from Microsoft Learn only.");
+                }
+                else
+                {
+                    var workIqTools = await _workIqTools
+                        .GetToolsAsync(userAssertion, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (workIqTools.Count > 0)
+                    {
+                        tools.AddRange(workIqTools);
+                        _logger.LogInformation("Added {Count} WorkIQ tools for this turn.", workIqTools.Count);
+                    }
                 }
             }
             catch (Exception ex)
