@@ -5,9 +5,11 @@ const inputEl = document.getElementById("input");
 const sendEl = document.getElementById("send");
 const resetEl = document.getElementById("reset");
 const statusEl = document.getElementById("status");
+const accountEl = document.getElementById("account");
 
 let sessionId = crypto.randomUUID();
 let thinkingEl = null;
+let signedIn = false;
 
 function addMessage(role, text) {
     if (emptyEl) emptyEl.remove();
@@ -59,6 +61,13 @@ formEl.addEventListener("submit", async (event) => {
             body: JSON.stringify({ session_id: sessionId, message }),
         });
 
+        if (response.status === 401) {
+            setBusy(false);
+            addMessage("assistant", "Please sign in first - Agent 365 traces every turn against the signed-in user.");
+            inputEl.focus();
+            return;
+        }
+
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const data = await response.json();
@@ -83,9 +92,52 @@ resetEl.addEventListener("click", () => {
 fetch("/api/info")
     .then((response) => response.json())
     .then((info) => {
-        statusEl.textContent =
-            `Model: ${info.deployment} · ${info.tools.length} Microsoft Learn tool(s): ${info.tools.join(", ")}`;
+        const parts = [
+            `Model: ${info.deployment}`,
+            `${info.tools.length} Microsoft Learn tool(s): ${info.tools.join(", ")}`,
+        ];
+        if (info.agent365 && info.agent365.configured) {
+            parts.push(
+                info.agent365.exporterEnabled
+                    ? "Agent 365 observability: exporting"
+                    : "Agent 365 observability: wired, exporter off");
+        }
+        statusEl.textContent = parts.join(" \u00b7 ");
     })
     .catch(() => {
         statusEl.textContent = "";
     });
+
+// Agent 365 signs every turn against the signed-in user, so surface who that is.
+function renderAccount(me) {
+    signedIn = me.signedIn;
+    accountEl.replaceChildren();
+
+    if (!me.signInRequired) return;
+
+    if (me.signedIn) {
+        const who = document.createElement("span");
+        who.className = "who";
+        who.textContent = me.name || me.username;
+        const out = document.createElement("a");
+        out.href = "/signout";
+        out.className = "secondary-link";
+        out.textContent = "Sign out";
+        accountEl.append(who, out);
+    } else {
+        const link = document.createElement("a");
+        link.href = "/signin";
+        link.className = "signin-link";
+        link.textContent = "Sign in";
+        accountEl.append(link);
+    }
+}
+
+fetch("/api/me")
+    .then((response) => response.json())
+    .then(renderAccount)
+    .catch(() => {});
+
+if (new URLSearchParams(location.search).get("signin") === "failed") {
+    addMessage("assistant", "Sign-in failed. Check the app registration and try again.");
+}

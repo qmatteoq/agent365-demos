@@ -95,3 +95,75 @@ uv sync
 ```
 
 This is not needed on x64 Windows, macOS or Linux.
+
+## Agent 365
+
+This agent is registered in Agent 365 and exports OpenTelemetry traces to Microsoft
+Defender. Registration was done with `a365 setup all`; the generated ids live in
+`a365.generated.config.json` and `.env` (both gitignored).
+
+| | |
+|---|---|
+| Auth mode | `obo` (on-behalf-of the signed-in user) |
+| Blueprint | `bb49ad8e-3857-469d-bc1b-6a9141089214` |
+| Agent identity | `ae1e93ef-18b6-49e4-9d60-8eae0225c8f1` |
+| Sign-in app | `python-agent-noteams WebClient` |
+
+### Why there is a separate sign-in app
+
+An agent blueprint cannot run interactive `/authorize` flows, so a dedicated web
+client app signs the user in and asks for `api://<blueprint>/access_agent_as_user`.
+That user token is the assertion for the agent on-behalf-of chain:
+
+1. **Hop 1** - blueprint + client secret + `fmi_path=<agent identity>` -> token
+   exchange assertion (T1).
+2. **Hop 2** - agent identity + T1 as `client_assertion` + the user token as
+   `assertion` -> Observability API token.
+
+Both hops are plain HTTP POSTs because MSAL Python does not serialise `fmi_path`.
+The result is a token for *the agent acting for the user*, which is what the backend
+requires - a plain delegated user token is rejected, because its principal is the human
+rather than the agent.
+
+The exporter flushes on a background thread with no user context, so the token is
+deposited into `app/a365/token_store.py` by the request path and read back by the
+exporter's resolver.
+
+### Sign in on `localhost`
+
+Browse to `http://localhost:8000`, **not** `http://127.0.0.1:8000`. Cookies are
+host-specific and the registered redirect URI uses `localhost`, so starting on
+`127.0.0.1` silently loses the session at the redirect.
+
+### Instrumentation notes
+
+* `use_microsoft_opentelemetry` runs at the top of `app/main.py` **before** the
+  LangChain and Azure OpenAI imports, otherwise auto-instrumentation cannot patch them.
+* Every turn runs inside a `BaggageBuilder` scope. Spans emitted outside one are
+  dropped by the exporter as *"Partitioned into 0 identity groups"*.
+* `InvokeAgentScope` is used as a context manager. Entering it is what attaches the
+  span to the OpenTelemetry context, so the LangChain inference and tool spans nest
+  underneath it; `start()` alone would leave them as orphans.
+* Agent Framework and Semantic Kernel instrumentation are disabled on purpose. Their
+  span enrichers register first and make the distro skip the LangChain enricher, which
+  is the one that maps this agent's messages and conversation id into the shape
+  Agent 365 expects.
+* `A365_OBSERVABILITY_LOG_LEVEL` is a Node.js-only variable that the Python distro
+  ignores, so `app/a365/observability.py` applies it to the distro's loggers itself.
+  Set it to `debug|info|warn|error` to see export confirmation - a successful export
+  is logged at DEBUG, and only failures are logged at ERROR.
+
+### Verifying the export
+
+With debug logging on, a successful turn logs:
+
+```
+Found 1 identity groups with N total spans to export
+Token resolved successfully for agent ae1e93ef-...
+HTTP 200 success on attempt 1. Correlation ID: ...
+  {"results":[{"spanId":"...","sinks":{"flashpoint":{"status":"sent"}, ...
+```
+
+`Found 0 identity groups` means the baggage scope is missing. Traces take roughly
+15-90 minutes to surface in Advanced Hunting; filter `CloudAppEvents` on the **agent
+identity** id, not the blueprint id.

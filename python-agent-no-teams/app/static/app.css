@@ -67,3 +67,34 @@ button {
 
 button.secondary { background: #6c757d; }
 button:disabled { background: #aaa; cursor: not-allowed; }
+
+/* Agent 365 sign-in bar */
+.topbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.account {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-top: 0.5rem;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.account .who {
+    color: #444;
+    font-weight: 600;
+}
+
+.account a {
+    color: #0067b8;
+    text-decoration: none;
+}
+
+.account a:hover {
+    text-decoration: underline;
+}
