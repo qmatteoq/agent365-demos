@@ -14,6 +14,7 @@ technology used to build the agent.
 | [`dotnet-agent-no-teams`](./dotnet-agent-no-teams) | Microsoft Agent Framework (.NET) + Azure OpenAI | Blazor Server web app, no Teams |
 | [`dotnet-agent-teams`](./dotnet-agent-teams) | Microsoft 365 Agents SDK (.NET) + Agent Framework + Azure OpenAI | Custom engine agent in Microsoft Teams / M365 Copilot |
 | [`python-agent-no-teams`](./python-agent-no-teams) | LangChain (Python) + Azure OpenAI | FastAPI web app, no Teams |
+| [`python-agent-teams`](./python-agent-teams) | Microsoft 365 Agents SDK (Python) + LangChain + Azure OpenAI | Custom engine agent in Microsoft Teams / M365 Copilot |
 
 ## Branching model
 
@@ -28,6 +29,8 @@ technology used to build the agent.
 | `a365/teams-agent` | `dotnet-agent-teams`, after onboarding (merged into `main`) |
 | `plain/python-agent-no-teams` | `python-agent-no-teams`, before onboarding |
 | `a365/python-agent-no-teams` | `python-agent-no-teams`, after onboarding (merged into `main`) |
+| `plain/python-agent-teams` | `python-agent-teams`, before onboarding |
+| `a365/python-agent-teams` | `python-agent-teams`, after onboarding (merged into `main`) |
 
 This makes the onboarding work visible as a diff:
 
@@ -50,6 +53,7 @@ it depends on, and attach the debugger.
 | `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
 | `dotnet-agent-teams` | Builds, brings the dev tunnel up, then starts the agent on port 3978 | Teams, once the agent is listening |
 | `python-agent-no-teams` | Syncs dependencies, starts the app, then opens the browser | <http://localhost:8000> |
+| `python-agent-teams` | Syncs dependencies, brings the dev tunnel up, then starts the agent on port 3979 | Teams, once the agent is listening |
 
 The two .NET agents run with `ASPNETCORE_ENVIRONMENT=Development`, which is what makes **user
 secrets** load. Neither can authenticate without them, so if a fresh clone fails at startup, check
@@ -90,28 +94,48 @@ you started from a terminal, so close that one first to avoid two relays forward
 
 ## Agent 365 capabilities per agent
 
-| Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `python-agent-no-teams` |
-| --- | --- | --- | --- |
-| Agent identity and blueprint | Yes | Yes | Yes |
-| Observability instrumentation | Yes | Yes, exported service-to-service | Yes, exported on-behalf-of |
-| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | No, see the note below |
-| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | Sign-in through a separate web client app |
+| Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `python-agent-no-teams` | `python-agent-teams` |
+| --- | --- | --- | --- | --- |
+| Agent identity and blueprint | Yes | Yes | Yes | Yes |
+| Observability instrumentation | Yes | Yes, exported service-to-service | Yes, exported on-behalf-of | Yes, exported service-to-service |
+| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | No, see the note below | No, see the note below |
+| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | Sign-in through a separate web client app | Teams identity only; no OBO needed |
 
-### Why the Python agent has no WorkIQ tools
+### Why the Python agents have no WorkIQ tools
 
 WorkIQ is wired into an agent through a framework-specific adapter package, and Microsoft does not
 publish one for Python and LangChain. Every other combination has one -
 `microsoft-agents-a365-tooling-extensions-agentframework`, `-openai`, `-googleadk`,
 `-semantickernel` and `-azureaifoundry` all exist on PyPI, and Node.js has a LangChain adapter, but
-`microsoft-agents-a365-tooling-extensions-langchain` does not exist.
+`microsoft-agents-a365-tooling-extensions-langchain` does not exist. This applies to both Python
+agents in this repo, whatever their hosting.
 
-Nothing about WorkIQ itself blocks this agent. Its servers are ordinary streamable HTTP MCP servers,
-which is the transport the agent already uses for Microsoft Learn, and the framework-agnostic
+Nothing about WorkIQ itself blocks these agents. Its servers are ordinary streamable HTTP MCP servers,
+which is the transport the agents already use for Microsoft Learn, and the framework-agnostic
 `microsoft-agents-a365-tooling` package exposes their URLs and scopes. What is missing is the glue,
 including the per-server token: the SDK acquires it through an M365 Agents SDK `TurnContext`, which a
-plain web app does not have. This agent already works around the same gap for observability with its
-own on-behalf-of chain, so the adapter is writable - it is simply unsupported code, so this demo
-leaves it out.
+plain web app does not have. `python-agent-no-teams` already works around the same gap for
+observability with its own on-behalf-of chain, so the adapter is writable - it is simply unsupported
+code, so these demos leave it out.
+
+### Two ways to authenticate the observability exporter
+
+The exporter's token must have the *agent identity* as its principal, but how the agent gets there
+depends on whether a human is signed in:
+
+| | Chain | Used by |
+| --- | --- | --- |
+| Web-hosted | On-behalf-of: the user's token is the assertion, so the token represents *the agent acting for the user* | `dotnet-agent-no-teams`, `python-agent-no-teams` |
+| Teams-hosted | Service-to-service: blueprint `fmi_path` exchange, then the agent identity authenticates with the resulting assertion | `dotnet-agent-teams`, `python-agent-teams` |
+
+A Teams agent has no interactive web sign-in and therefore no user assertion to exchange, which is
+what forces the second shape. In both cases a plain delegated user token is rejected by the export
+route, because its principal is the human rather than the agent.
+
+> ⚠️ On the two Teams agents, `a365 setup all` overwrites the bot channel credentials with the
+> blueprint's and must be undone afterwards. Entra bars agentic applications from client-credentials
+> tokens (AADSTS82001), so a blueprint cannot sign Bot Framework replies, and it is also the wrong
+> audience for validating the inbound Teams token. Each agent's README documents the repair.
 
 ### How the Teams agent authenticates
 
