@@ -7,8 +7,7 @@ using Microsoft.Agents.Hosting.AspNetCore;
 using Microsoft.Agents.Storage;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
 // A365 WorkIQ - added by add-workiq-tools skill
-using Microsoft.Agents.A365.Tooling.Services;
-using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
+using LearnTeammateAgent.Agent365;
 using Microsoft.Extensions.AI;
 using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
@@ -125,11 +124,12 @@ builder.Services.AddSingleton<IChatClient>(sp =>
 
 builder.Services.AddSingleton<LearnAgentFactory>();
 
-// A365 WorkIQ - added by add-workiq-tools skill.
-// Singleton rather than the AddMcpServices() one-liner, which registers these as scoped:
-// LearnAgent is a singleton, so a scoped registration would be captured and go stale.
-builder.Services.AddSingleton<IMcpToolServerConfigurationService, McpToolServerConfigurationService>();
-builder.Services.AddSingleton<IMcpToolRegistrationService, McpToolRegistrationService>();
+// A365 WorkIQ - added by add-workiq-tools skill, then rewired.
+// The SDK's McpToolRegistrationService / McpToolServerConfigurationService are deliberately NOT
+// registered: they are built against ModelContextProtocol.Core 0.2.0-preview.3 and throw
+// TypeLoadException under the 1.3.0 this project needs. WorkIqToolProvider connects to the servers
+// listed in ToolingManifest.json directly instead. See that file for the full reasoning.
+builder.Services.AddSingleton<WorkIqToolProvider>();
 
 // Conversation sessions are kept per Teams conversation so the agent has multi-turn memory.
 builder.Services.AddSingleton<ConversationSessionStore>();
