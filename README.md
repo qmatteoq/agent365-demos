@@ -41,7 +41,7 @@ Switch to a `plain/*` branch to demo the "before" state, switch back to `main` f
 | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes |
 | Observability instrumentation | Yes | Yes, exported service-to-service |
-| WorkIQ mail / calendar / Teams tools | Yes | Wired, see the note below |
+| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below |
 | User authentication | Not applicable, no user context | On-Behalf-Of through Teams SSO |
 
 ### How the Teams agent authenticates
@@ -61,20 +61,56 @@ The agent uses two different identities, for two different jobs:
 Traces reach the service over the service-to-service route. Delegated and service-to-service
 traces use different routes and do not accept each other's tokens, so the two have to agree.
 
-### Known issue: WorkIQ tools on the Teams agent
+### Working around a broken tool discovery route
 
-`dotnet-agent-teams` has WorkIQ fully wired, including the On-Behalf-Of sign-in that the classic
-Teams bot channel requires, but the tools do not load at runtime. The tool discovery call returns
-HTTP 500 from the service:
+Both agents load their WorkIQ tools without asking the tooling gateway which servers they may use.
+That discovery call fails service side:
 
 ```text
 GET https://agent365.svc.cloud.microsoft/agents/v2/{agentId}/mcpServers  ->  500
 ```
 
 The same route returns 500 for an agent id that does not exist, where a 404 would be expected, and
-other `/agents/v2/` routes are healthy. That points at the route itself rather than at this agent,
-its identity, or its configuration. Every published version of `Microsoft.Agents.A365.Tooling`
-hardcodes that path, so there is no version to pin to and no setting to change.
+other `/agents/v2/` routes are healthy, which points at the route itself rather than at either
+agent. Every published version of `Microsoft.Agents.A365.Tooling` hardcodes that path, so there is
+no version to pin to and no setting to change.
 
-The agent handles this by falling back to Microsoft Learn only, so it stays usable for demos. No
-code change should be needed once the service is fixed.
+Discovery turns out to be unnecessary. `ToolingManifest.json`, written by
+`a365 develop add-mcp-servers`, already lists the url, audience and scope of every server, and the
+servers themselves are healthy. Both agents therefore read that manifest and connect to each server
+directly:
+
+- [`dotnet-agent-no-teams/Agent365/WorkIqToolProvider.cs`](./dotnet-agent-no-teams/Agent365/WorkIqToolProvider.cs)
+- [`dotnet-agent-teams/Agent365/WorkIqToolProvider.cs`](./dotnet-agent-teams/Agent365/WorkIqToolProvider.cs)
+
+Each server is contacted independently and a failure is logged and skipped, so a server that is
+down costs only its own tools. Once the gateway is fixed, these providers can be replaced by
+`IMcpToolRegistrationService.GetMcpToolsAsync` again with no other change.
+
+### The token the WorkIQ servers expect
+
+The servers check for the delegated `Tools.ListInvoke.All` scope and reject anything else, including
+an app-only token minted by the agent identity:
+
+```text
+403  Access denied: Scope 'Tools.ListInvoke.All' is not present in the request.
+```
+
+So the token has to start from the signed-in user. In the Teams agent that takes three hops, in
+[`Agent365/WorkIqTokenService.cs`](./dotnet-agent-teams/Agent365/WorkIqTokenService.cs):
+
+1. The bot channel app exchanges the user's Teams token for the blueprint's `access_agent_as_user`
+   scope. Teams SSO issues a token whose audience is the channel app, and the last hop only accepts
+   an assertion issued to the blueprint family.
+2. The blueprint requests a token-exchange assertion with `fmi_path` set to the agent identity,
+   proving it owns that identity.
+3. The agent identity performs the final On-Behalf-Of exchange for the WorkIQ audience, presenting
+   that assertion as its client credential.
+
+The result is a token that belongs to the governed agent identity acting for the user, which is what
+tool calls have to be attributed to. The channel app holds the same consented permissions and could
+satisfy the scope check on its own, but that token would not be tied to the agent identity, so it is
+deliberately not used.
+
+The non-Teams agent runs the same chain minus the first hop, because its users sign in to the
+blueprint scope directly.
