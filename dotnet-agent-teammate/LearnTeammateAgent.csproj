@@ -1,10 +1,11 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LearnTeammateAgent</RootNamespace>
+    <UserSecretsId>95688350-c6c3-4d77-be81-e5534fdf5405</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
