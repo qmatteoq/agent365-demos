@@ -94,8 +94,24 @@ you started from a terminal, so close that one first to avoid two relays forward
 | --- | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes | Yes |
 | Observability instrumentation | Yes | Yes, exported service-to-service | Yes, exported on-behalf-of |
-| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | No |
+| WorkIQ mail / calendar / Teams tools | Yes | Yes, see the note below | No, see the note below |
 | User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | Sign-in through a separate web client app |
+
+### Why the Python agent has no WorkIQ tools
+
+WorkIQ is wired into an agent through a framework-specific adapter package, and Microsoft does not
+publish one for Python and LangChain. Every other combination has one -
+`microsoft-agents-a365-tooling-extensions-agentframework`, `-openai`, `-googleadk`,
+`-semantickernel` and `-azureaifoundry` all exist on PyPI, and Node.js has a LangChain adapter, but
+`microsoft-agents-a365-tooling-extensions-langchain` does not exist.
+
+Nothing about WorkIQ itself blocks this agent. Its servers are ordinary streamable HTTP MCP servers,
+which is the transport the agent already uses for Microsoft Learn, and the framework-agnostic
+`microsoft-agents-a365-tooling` package exposes their URLs and scopes. What is missing is the glue,
+including the per-server token: the SDK acquires it through an M365 Agents SDK `TurnContext`, which a
+plain web app does not have. This agent already works around the same gap for observability with its
+own on-behalf-of chain, so the adapter is writable - it is simply unsupported code, so this demo
+leaves it out.
 
 ### How the Teams agent authenticates
 
