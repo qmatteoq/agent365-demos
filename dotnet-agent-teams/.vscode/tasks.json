@@ -1,0 +1,72 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build agent",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/LearnTeamsAgent.csproj",
+        "-property:GenerateFullPaths=true",
+        "-consoleloggerparameters:NoSummary"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      // Teams reaches the agent through this tunnel, so it has to be up before the agent starts.
+      //
+      // The tunnel is named rather than anonymous on purpose: a named tunnel keeps the same public
+      // url every time it is hosted, and that url is registered as the messaging endpoint of the
+      // Azure Bot. An anonymous tunnel would hand out a new url on each run and silently break the
+      // channel until the endpoint was updated by hand.
+      //
+      // Create it once, if it does not exist yet:
+      //   devtunnel create dotnet-agent-teams-tunnel --allow-anonymous
+      //   devtunnel port create dotnet-agent-teams-tunnel --port-number 3978
+      // Then check the url it hands out with:
+      //   devtunnel show dotnet-agent-teams-tunnel
+      "label": "start dev tunnel",
+      "type": "process",
+      "command": "devtunnel",
+      "args": ["host", "dotnet-agent-teams-tunnel"],
+      "isBackground": true,
+      // Hosting the same tunnel twice would leave a stray relay process behind on every F5.
+      "runOptions": {
+        "instanceLimit": 1
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "agent"
+      },
+      "problemMatcher": {
+        "owner": "devtunnel",
+        "pattern": [
+          {
+            "regexp": "^\\s*(?:Error|error):\\s+(.*)$",
+            "message": 1
+          }
+        ],
+        // The task never exits, so VS Code is told to treat it as ready once the relay reports it
+        // is accepting connections. Without this, F5 would wait on it forever.
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*Hosting port:",
+          "endsPattern": "^\\s*Ready to accept connections for tunnel:"
+        }
+      }
+    },
+    {
+      // The tunnel has to be ready before the agent binds the port, hence the ordered sequence.
+      "label": "start agent prerequisites",
+      "dependsOn": ["build agent", "start dev tunnel"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -35,6 +35,51 @@ git diff plain/teams-agent..main -- dotnet-agent-teams
 
 Switch to a `plain/*` branch to demo the "before" state, switch back to `main` for the "after".
 
+## Running an agent
+
+Open **the agent's own folder** in VS Code, not the repository root, and press <kbd>F5</kbd>. Each
+agent carries its own `.vscode/launch.json` and `.vscode/tasks.json`, which build it, start whatever
+it depends on, and attach the debugger.
+
+| Agent | What F5 does | Reachable at |
+| --- | --- | --- |
+| `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
+| `dotnet-agent-teams` | Builds, brings the dev tunnel up, then starts the agent on port 3978 | Teams, once the agent is listening |
+
+Both run with `ASPNETCORE_ENVIRONMENT=Development`, which is what makes **user secrets** load.
+Neither agent can authenticate without them, so if a fresh clone fails at startup, check that they
+are set:
+
+```powershell
+dotnet user-secrets list
+```
+
+Neither agent has an `appsettings.Development.json` disabling the Agent 365 exporter, so an F5 run
+exports traces to Agent 365 exactly like a production run. That is deliberate: it is the point of
+the demo.
+
+### The Teams agent's dev tunnel
+
+Teams cannot reach `localhost`, so the agent is exposed through a **named** dev tunnel that the
+launch task hosts automatically. Named rather than anonymous matters: a named tunnel keeps the same
+public url every time, and that url is registered as the messaging endpoint of the Azure Bot. An
+anonymous tunnel would issue a new url per run and silently break the channel.
+
+The tunnel already exists in this environment. On a new machine, create it once:
+
+```powershell
+devtunnel create dotnet-agent-teams-tunnel --allow-anonymous
+devtunnel port create dotnet-agent-teams-tunnel --port-number 3978
+devtunnel show dotnet-agent-teams-tunnel
+```
+
+`devtunnel show` prints the public url. If it differs from the one registered on the Azure Bot,
+update the bot's messaging endpoint to `<url>/api/messages`.
+
+Host it yourself with `devtunnel host dotnet-agent-teams-tunnel` if you want it up without running
+the agent. VS Code will not start a second copy of its own tunnel task, but it cannot see a tunnel
+you started from a terminal, so close that one first to avoid two relays forwarding the same port.
+
 ## Agent 365 capabilities per agent
 
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` |

@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // F5 builds the agent, brings the dev tunnel up, then starts the agent on the port the
+      // tunnel forwards to. Once it is listening, send it a message from Teams as usual.
+      "name": "Run Learn Teams agent",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "start agent prerequisites",
+      "program": "${workspaceFolder}/bin/Debug/net10.0/LearnTeamsAgent.dll",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        // Development is what makes user secrets load, and this agent cannot start without them:
+        // the bot channel app secret, the blueprint secret used by the observability token chain
+        // and the Work IQ token chain all live there. Check with 'dotnet user-secrets list'.
+        //
+        // There is deliberately no appsettings.Development.json turning the exporter off, so
+        // traces are exported to Agent 365 on an F5 run as well. That is the point of the demo.
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        // Must match the port the dev tunnel forwards, otherwise Teams reaches nothing.
+        "ASPNETCORE_URLS": "http://localhost:3978",
+        // Verbose Agent 365 observability logging, so the export is visible while demoing.
+        "OTEL_LOG_LEVEL": "INFO",
+        "A365_OBSERVABILITY_LOG_LEVEL": "info|warn|error"
+      }
+    }
+  ]
+}

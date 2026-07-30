@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // This agent is a self-hosted Blazor app with no Teams channel, so there is nothing to
+      // tunnel: F5 builds it, starts it and opens the browser on the chat page.
+      "name": "Run Learn agent",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build agent",
+      "program": "${workspaceFolder}/bin/Debug/net10.0/LearnMcpAgent.dll",
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        // Development is what makes user secrets load. The Azure OpenAI key, the Agent 365
+        // blueprint secret and the agent identity all live there, so outside Development the
+        // agent starts but cannot authenticate anything. Run 'dotnet user-secrets list' to check.
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "https://localhost:7199;http://localhost:5140",
+        // Verbose Agent 365 observability logging, so the export is visible while demoing.
+        "OTEL_LOG_LEVEL": "INFO",
+        "A365_OBSERVABILITY_LOG_LEVEL": "info|warn|error"
+      },
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "\\bNow listening on:\\s+(https://\\S+)"
+      }
+    }
+  ]
+}
