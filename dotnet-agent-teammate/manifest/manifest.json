@@ -1,0 +1,32 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/vdevPreview/MicrosoftTeams.schema.json",
+  "id": "c41ceef2-c7c9-4618-bde2-75a125ba7c1e",
+  "name": {
+    "short": "dotnet-teammate Blueprint",
+    "full": "dotnet-teammate Blueprint"
+  },
+  "description": {
+    "short": "Researches Microsoft product questions in the official Microsoft Learn docs and cites its sources.",
+    "full": "A research assistant for the Microsoft ecosystem - Azure, Microsoft 365, Power Platform, .NET, Windows, Microsoft Entra, Copilot and Dynamics 365. It answers questions by searching the official Microsoft Learn documentation through the Microsoft Learn MCP server, grounds every factual statement in what it retrieved, and cites the source URLs. It works in Microsoft Teams, Microsoft 365 Copilot and by email, and can also read its own mailbox and calendar. As an Agent 365 AI Teammate it acts under its own identity rather than on behalf of the person asking, so its activity is attributable to the agent itself."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#9ec9d9",
+  "version": "1.1.4",
+  "manifestVersion": "devPreview",
+  "developer": {
+    "name": "Microsoft Corporation",
+    "mpnId": "",
+    "websiteUrl": "https://go.microsoft.com/fwlink/?LinkId=518028",
+    "privacyUrl": "https://go.microsoft.com/fwlink/?LinkId=518028",
+    "termsOfUseUrl": "https://shares.datatransfer.microsoft.com/assets/Microsoft_Terms_of_Use.html"
+  },
+  "agenticUserTemplates": [
+    {
+      "id": "7b0926a6-c4ee-445a-a913-bd054594bd09",
+      "file": "agenticUserTemplateManifest.json"
+    }
+  ]
+}
