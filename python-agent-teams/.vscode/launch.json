@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // F5 syncs dependencies, brings the dev tunnel up, then starts the agent on the port
+      // the tunnel forwards to. Once it is listening, message it from Teams as usual.
+      "name": "Run Learn Teams agent (Python)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app.main",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "preLaunchTask": "start agent prerequisites",
+      // Use the project's own virtual environment rather than whatever interpreter VS Code
+      // happens to have selected. It must be the x86_64 CPython: this repo is developed on
+      // Windows on ARM, and tiktoken (via langchain-openai) ships no win-arm64 wheel, so a
+      // native ARM64 interpreter tries to build it from Rust source and fails.
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "windows": {
+        "python": "${workspaceFolder}/.venv/Scripts/python.exe"
+      }
+    }
+  ]
+}

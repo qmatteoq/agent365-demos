@@ -1,0 +1,70 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // Keeps .venv in step with pyproject.toml / uv.lock before every run.
+      //
+      // --python pins the x86_64 interpreter deliberately. On Windows on ARM, uv would
+      // otherwise pick the native aarch64 CPython, and tiktoken (pulled in by
+      // langchain-openai) publishes no win-arm64 wheel, so the sync fails trying to
+      // invoke a Rust compiler.
+      "label": "sync dependencies",
+      "type": "process",
+      "command": "uv",
+      "args": ["sync", "--python", "${workspaceFolder}/.venv/Scripts/python.exe"],
+      "problemMatcher": []
+    },
+    {
+      // Teams reaches the agent through this tunnel, so it has to be up before the agent starts.
+      //
+      // The tunnel is named rather than anonymous on purpose: a named tunnel keeps the same
+      // public url every time it is hosted, and that url is registered as the messaging
+      // endpoint of the Azure Bot. An anonymous tunnel would hand out a new url on each run
+      // and silently break the channel until the endpoint was updated by hand.
+      //
+      // Create it once, if it does not exist yet:
+      //   devtunnel create python-agent-teams-tunnel --allow-anonymous
+      //   devtunnel port create python-agent-teams-tunnel --port-number 3979
+      // The public url is only printed while hosting; it is NOT derived from the tunnel name.
+      //
+      // Port 3979 rather than 3978 so this agent and the .NET Teams agent can run side by side.
+      "label": "start dev tunnel",
+      "type": "process",
+      "command": "devtunnel",
+      "args": ["host", "python-agent-teams-tunnel"],
+      "isBackground": true,
+      // Hosting the same tunnel twice would leave a stray relay process behind on every F5.
+      "runOptions": {
+        "instanceLimit": 1
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "agent"
+      },
+      "problemMatcher": {
+        "owner": "devtunnel",
+        "pattern": [
+          {
+            "regexp": "^\\s*(?:Error|error):\\s+(.*)$",
+            "message": 1
+          }
+        ],
+        // The task never exits, so VS Code is told to treat it as ready once the relay reports
+        // it is accepting connections. Without this, F5 would wait on it forever.
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*Hosting port:",
+          "endsPattern": "^\\s*Ready to accept connections for tunnel:"
+        }
+      }
+    },
+    {
+      // The tunnel has to be ready before the agent binds the port, hence the ordered sequence.
+      "label": "start agent prerequisites",
+      "dependsOn": ["sync dependencies", "start dev tunnel"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}
