@@ -1,8 +1,15 @@
+using Microsoft.Agents.A365.Observability.Hosting.Caching;
+using Microsoft.Agents.A365.Observability.Runtime.Common;
+using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
+using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
+using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App;
 using Microsoft.Agents.Builder.State;
 using Microsoft.Agents.Core.Models;
+using Microsoft.Extensions.AI;
+using ObsRequest = Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts.Request;
 
 namespace LearnTeamsAgent.Agent;
 
@@ -22,16 +29,34 @@ public class LearnAgent : AgentApplication
     private readonly AIAgent _agent;
     private readonly ConversationSessionStore _sessions;
     private readonly ILogger<LearnAgent> _logger;
+    private readonly IExporterTokenCache<AgenticTokenStruct>? _tokenCache;
+    private readonly IMcpToolRegistrationService _workIqTools;
+    private readonly LearnMcpTools _learnTools;
+    private readonly IConfiguration _configuration;
+    private readonly string? _agenticAuthHandlerName;
+    private readonly string? _oboAuthHandlerName;
 
     public LearnAgent(
         AgentApplicationOptions options,
         AIAgent agent,
         ConversationSessionStore sessions,
+        IExporterTokenCache<AgenticTokenStruct> tokenCache,
+        IMcpToolRegistrationService workIqTools,
+        LearnMcpTools learnTools,
+        IConfiguration configuration,
         ILogger<LearnAgent> logger) : base(options)
     {
         _agent = agent;
         _sessions = sessions;
         _logger = logger;
+        _tokenCache = tokenCache;
+        _workIqTools = workIqTools;
+        _learnTools = learnTools;
+        _configuration = configuration;
+
+        // The handler names come from AgentApplication:UserAuthorization:Handlers in appsettings.json.
+        _agenticAuthHandlerName = configuration["AgentApplication:AgenticAuthHandlerName"] ?? "agentic";
+        _oboAuthHandlerName = configuration["AgentApplication:OboAuthHandlerName"];
 
         OnConversationUpdate(ConversationUpdateEvents.MembersAdded, WelcomeAsync);
         OnMessage("/reset", ResetAsync);
@@ -72,16 +97,51 @@ public class LearnAgent : AgentApplication
         // Researching on Microsoft Learn takes a few seconds, so keep the channel from timing out.
         await turnContext.SendActivityAsync(new Activity { Type = ActivityTypes.Typing }, cancellationToken);
 
+        // A365 Observability — best-effort instrumentation (verify against official sample)
+        var (agentId, tenantId) = ResolveObservabilityIdentity(turnContext);
+        var hasObservabilityIdentity = !string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(tenantId);
+
+        // Baggage flows the tenant and agent id onto every child span the AI SDK emits. Without it
+        // the exporter cannot group the spans and silently drops them.
+        using IDisposable? baggageScope = hasObservabilityIdentity
+            ? new BaggageBuilder()
+                .TenantId(tenantId!)
+                .AgentId(agentId!)
+                .ConversationId(turnContext.Activity.Conversation?.Id ?? string.Empty)
+                .Build()
+            : null;
+
+        if (hasObservabilityIdentity)
+        {
+            RegisterObservabilityToken(turnContext, agentId!, tenantId!);
+        }
+
+        // InvokeAgentScope emits the parent "InvokeAgent" record. Without it Advanced Hunting shows
+        // only orphan inference rows and never renders the agent turn.
+        using var invokeScope = hasObservabilityIdentity
+            ? StartInvokeAgentScope(turnContext, agentId!, tenantId!, question)
+            : null;
+
         try
         {
             var session = await _sessions.GetOrCreateAsync(turnContext.Activity.Conversation.Id, cancellationToken);
-            var response = await _agent.RunAsync(question, session, cancellationToken: cancellationToken);
+
+            // A365 WorkIQ — added by add-workiq-tools skill
+            // WorkIQ tools are resolved per turn because each one is called with a token exchanged
+            // for the current user, so the agent can only touch mail, calendar and Teams data that
+            // the user can already see themselves.
+            var runOptions = await BuildRunOptionsAsync(turnContext, agentId, cancellationToken)
+                .ConfigureAwait(false);
+
+            var response = await _agent.RunAsync(question, session, runOptions, cancellationToken);
 
             var answer = response.Text;
             if (string.IsNullOrWhiteSpace(answer))
             {
                 answer = "I couldn't find an answer to that in the Microsoft Learn documentation.";
             }
+
+            invokeScope?.RecordOutputMessages([answer]);
 
             await turnContext.SendActivityAsync(MessageFactory.Text(answer), cancellationToken);
         }
@@ -92,5 +152,155 @@ public class LearnAgent : AgentApplication
                 MessageFactory.Text("Sorry, something went wrong while researching that. Please try again."),
                 cancellationToken);
         }
+    }
+
+    // A365 Observability — best-effort instrumentation (verify against official sample)
+    /// <summary>
+    /// Works out which Agent 365 identity this turn belongs to. Teams agentic turns carry the
+    /// identity on the activity itself. For every other channel the agent reports under the
+    /// identity that <c>a365 setup</c> provisioned for it, which is also the id pinned onto the
+    /// <see cref="AIAgent"/>, so the parent and child spans agree.
+    /// </summary>
+    private (string? AgentId, string? TenantId) ResolveObservabilityIdentity(ITurnContext turnContext)
+    {
+        var agentId = turnContext.Activity.IsAgenticRequest()
+            ? turnContext.Activity.GetAgenticInstanceId()
+            : null;
+
+        if (string.IsNullOrEmpty(agentId))
+        {
+            agentId = _configuration["Agent365Observability:AgentId"];
+        }
+
+        var tenantId = turnContext.Activity.Conversation?.TenantId
+                    ?? turnContext.Activity.Recipient?.TenantId
+                    ?? _configuration["Agent365Observability:TenantId"];
+
+        return (agentId, tenantId);
+    }
+
+    // A365 Observability — best-effort instrumentation (verify against official sample)
+    private void RegisterObservabilityToken(ITurnContext turnContext, string agentId, string tenantId)
+    {
+        try
+        {
+            var authHandlerName = turnContext.Activity.IsAgenticRequest()
+                ? _agenticAuthHandlerName
+                : _oboAuthHandlerName ?? _agenticAuthHandlerName;
+
+            _tokenCache?.RegisterObservability(
+                agentId,
+                tenantId,
+                new AgenticTokenStruct(
+                    UserAuthorization,
+                    turnContext,
+                    authHandlerName ?? string.Empty,
+                    string.Empty),
+                EnvironmentUtils.GetObservabilityAuthenticationScope());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to register the Agent 365 observability token.");
+        }
+    }
+
+    // A365 Observability — best-effort instrumentation (verify against official sample)
+    private InvokeAgentScope StartInvokeAgentScope(
+        ITurnContext turnContext,
+        string agentId,
+        string tenantId,
+        string question)
+    {
+        var observability = _configuration.GetSection("Agent365Observability");
+        var blueprintId = observability["AgentBlueprintId"] ?? string.Empty;
+
+        if (string.IsNullOrEmpty(blueprintId))
+        {
+            _logger.LogWarning(
+                "Agent365Observability:AgentBlueprintId is empty - Defender will show per-instance " +
+                "activity only, with no roll-up to the agent blueprint.");
+        }
+
+        var agentDetails = new AgentDetails(
+            agentId: agentId,
+            agentName: observability["AgentName"] ?? "LearnTeamsAgent",
+            agentDescription: observability["AgentDescription"] ?? string.Empty,
+            agentBlueprintId: blueprintId,
+            tenantId: tenantId);
+
+        var from = turnContext.Activity.From;
+        var callerDetails = new CallerDetails(
+            userDetails: new UserDetails(
+                userId: from?.AadObjectId ?? from?.Id ?? "unknown",
+                userName: from?.Name ?? "unknown"));
+
+        var conversationId = turnContext.Activity.Conversation?.Id ?? "unknown";
+        var request = new ObsRequest(
+            content: question,
+            sessionId: conversationId,
+            channel: new Channel(turnContext.Activity.ChannelId ?? "msteams"),
+            conversationId: conversationId);
+
+        // The endpoint is trace metadata only. It is built from the blueprint GUID under the
+        // reserved .invalid TLD, because the agent's display name is free text and could contain
+        // characters that are not valid in a host name.
+        var endpoint = string.IsNullOrEmpty(blueprintId)
+            ? new Uri("https://agent.invalid/")
+            : new Uri($"https://{blueprintId}.agent.invalid/");
+
+        var scope = InvokeAgentScope.Start(
+            request,
+            new InvokeAgentScopeDetails(endpoint),
+            agentDetails,
+            callerDetails);
+
+        scope.RecordInputMessages([question]);
+        return scope;
+    }
+
+    // A365 WorkIQ — added by add-workiq-tools skill
+    /// <summary>
+    /// Builds the run options for this turn: the Microsoft Learn tools, which are the same for
+    /// everyone, plus the WorkIQ tools resolved for the signed-in user. When WorkIQ is unavailable
+    /// - no user token, or consent not yet granted - the agent still answers from Microsoft Learn.
+    /// </summary>
+    private async Task<ChatClientAgentRunOptions> BuildRunOptionsAsync(
+        ITurnContext turnContext,
+        string? agentId,
+        CancellationToken cancellationToken)
+    {
+        var tools = new List<AITool>(_learnTools.Tools);
+
+        var handlerName = turnContext.Activity.IsAgenticRequest()
+            ? _agenticAuthHandlerName
+            : _oboAuthHandlerName ?? _agenticAuthHandlerName;
+
+        if (!string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(handlerName))
+        {
+            try
+            {
+                var workIqTools = await _workIqTools
+                    .GetMcpToolsAsync(agentId, UserAuthorization, handlerName, turnContext)
+                    .ConfigureAwait(false);
+
+                if (workIqTools is { Count: > 0 })
+                {
+                    tools.AddRange(workIqTools);
+                    _logger.LogInformation("Added {Count} WorkIQ tools for this turn.", workIqTools.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "WorkIQ tools are unavailable for this turn; answering from Microsoft Learn only.");
+            }
+        }
+
+        // The run options replace the agent's own ChatOptions, so the instructions have to be
+        // repeated here or the agent would lose them for this turn.
+        return new ChatClientAgentRunOptions(new ChatOptions
+        {
+            Instructions = AgentDefaults.Instructions,
+            Tools = tools,
+        });
     }
 }

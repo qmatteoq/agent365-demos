@@ -36,3 +36,6 @@ Thumbs.db
 run.log
 
 appPackage.zip
+
+# Local run logs
+*.log
