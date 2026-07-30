@@ -30,8 +30,19 @@ from microsoft_agents.hosting.core import (
 
 load_dotenv(path.join(path.dirname(path.dirname(path.abspath(__file__))), ".env"))
 
-from app.agent import LearnAgent  # noqa: E402  (must follow load_dotenv)
-from app.config import settings  # noqa: E402
+from app.config import settings  # noqa: E402  (must follow load_dotenv)
+from app.a365.fmi import ObservabilityTokenService  # noqa: E402
+from app.a365.observability import (  # noqa: E402
+    build_baggage_scope,
+    init_observability,
+    start_invoke_scope,
+)
+
+# Must run before app.agent is imported: the distro patches LangChain and the Azure OpenAI
+# client at import time, and anything already imported is missed.
+OBSERVABILITY_ENABLED = init_observability(settings)
+
+from app.agent import LearnAgent  # noqa: E402  (must follow init_observability)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +75,24 @@ AGENT_APP = AgentApplication[TurnState](
 )
 
 LEARN_AGENT = LearnAgent(settings)
+TOKEN_SERVICE = ObservabilityTokenService(settings)
+
+
+def _caller(context: TurnContext) -> dict[str, str]:
+    """Identify the Teams user driving the turn.
+
+    ``aad_object_id`` is the Entra object id and is what the Admin Center and Defender
+    correlate on; ``from_property.id`` is only a channel-scoped id, so it is the fallback
+    rather than the first choice. Teams does not put the address on the activity.
+    """
+    sender = context.activity.from_property
+    if sender is None:
+        return {}
+    return {
+        "id": sender.aad_object_id or sender.id or "",
+        "name": sender.name or "",
+        "email": "",
+    }
 
 
 async def _welcome(context: TurnContext, _state: TurnState) -> None:
@@ -87,8 +116,10 @@ async def on_message(context: TurnContext, _state: TurnState) -> None:
         await context.send_activity("Ask me a question about the Microsoft ecosystem.")
         return
 
+    conversation_id = context.activity.conversation.id
+
     try:
-        answer = await LEARN_AGENT.ask(context.activity.conversation.id, question)
+        answer = await _answer(conversation_id, question, _caller(context))
     except Exception:
         # A failed turn must not take the channel down: Teams would show a bare
         # "the bot failed to respond" with nothing actionable in it.
@@ -99,6 +130,23 @@ async def on_message(context: TurnContext, _state: TurnState) -> None:
         return
 
     await context.send_activity(answer)
+
+
+async def _answer(conversation_id: str, question: str, user: dict[str, str]) -> str:
+    """Run one turn, traced when Agent 365 observability is configured."""
+    if not OBSERVABILITY_ENABLED:
+        return await LEARN_AGENT.ask(conversation_id, question)
+
+    # The baggage scope has to wrap the invoke scope: the exporter reads the identity
+    # dimensions off baggage and drops any span emitted outside one. The inference and
+    # tool spans underneath come from the distro's LangChain instrumentation, so only
+    # the agent-level span is opened by hand.
+    with build_baggage_scope(settings, user, conversation_id):
+        with start_invoke_scope(settings, user, question, conversation_id) as scope:
+            scope.record_input_messages([question])
+            answer = await LEARN_AGENT.ask(conversation_id, question)
+            scope.record_output_messages([answer])
+            return answer
 
 
 @AGENT_APP.activity("installationUpdate")
@@ -124,7 +172,11 @@ async def _messages(req: Request) -> Response:
 
 async def _health(_: Request) -> Response:
     return Response(
-        text=f"Microsoft Learn agent is running. MCP tools: {LEARN_AGENT.tool_names or 'not yet connected'}",
+        text=(
+            f"Microsoft Learn agent is running. "
+            f"MCP tools: {LEARN_AGENT.tool_names or 'not yet connected'}. "
+            f"A365 observability: {'on' if OBSERVABILITY_ENABLED else 'off'}"
+        ),
         content_type="text/plain",
     )
 
@@ -143,6 +195,16 @@ async def _auth_for_messages_only(request: Request, handler):
     return await handler(request)
 
 
+async def _start_token_service(_: Application) -> None:
+    if OBSERVABILITY_ENABLED:
+        await TOKEN_SERVICE.start()
+
+
+async def _stop_token_service(_: Application) -> None:
+    if OBSERVABILITY_ENABLED:
+        await TOKEN_SERVICE.stop()
+
+
 def create_app() -> Application:
     app = Application(middlewares=[_auth_for_messages_only])
     app.router.add_post("/api/messages", _messages)
@@ -153,6 +215,11 @@ def create_app() -> Application:
     app["agent_configuration"] = CONNECTION_MANAGER.get_default_connection_configuration()
     app["agent_app"] = AGENT_APP
     app["adapter"] = ADAPTER
+
+    # The exporter needs a token before the first turn, and the refresh loop needs the
+    # running event loop, so both are bound to the application lifecycle.
+    app.on_startup.append(_start_token_service)
+    app.on_cleanup.append(_stop_token_service)
     return app
 
 
