@@ -60,7 +60,47 @@ public class LearnAgent : AgentApplication
 
         OnConversationUpdate(ConversationUpdateEvents.MembersAdded, WelcomeAsync);
         OnMessage("/reset", ResetAsync);
-        OnActivity(ActivityTypes.Message, OnMessageAsync, rank: RouteRank.Last);
+        OnMessage("/signout", SignOutAsync);
+
+        // Sign-in is attached to THIS route only, rather than enabled globally. Global
+        // AutoSignIn fires on every activity - including the conversationUpdate raised when the
+        // app is installed - so the user was prompted (and saw a failure) before they had even
+        // asked anything. Only a real question needs the Microsoft 365 tools.
+        if (!string.IsNullOrEmpty(_oboAuthHandlerName))
+        {
+            OnActivity(
+                ActivityTypes.Message,
+                OnMessageAsync,
+                rank: RouteRank.Last,
+                autoSignInHandlers: [_oboAuthHandlerName]);
+        }
+        else
+        {
+            OnActivity(ActivityTypes.Message, OnMessageAsync, rank: RouteRank.Last);
+        }
+
+        // Sign-in is silent when Teams SSO succeeds, so a failure would otherwise surface only
+        // as missing WorkIQ tools. Surface it to the user and the log instead.
+        UserAuthorization.OnUserSignInFailure(async (turnContext, turnState, handlerName, response, initiatingActivity, ct) =>
+        {
+            _logger.LogWarning(
+                "Sign-in failed for handler {Handler}: {Cause} {Error}",
+                handlerName, response.Cause, response.Error?.Message);
+
+            await turnContext.SendActivityAsync(
+                MessageFactory.Text(
+                    "I couldn't sign you in, so my Microsoft 365 tools (mail, calendar, Teams) aren't available. " +
+                    "I can still research Microsoft Learn for you."),
+                ct);
+        });
+    }
+
+    private async Task SignOutAsync(ITurnContext turnContext, ITurnState turnState, CancellationToken cancellationToken)
+    {
+        await UserAuthorization.SignOutUserAsync(turnContext, turnState, cancellationToken: cancellationToken);
+        await turnContext.SendActivityAsync(
+            MessageFactory.Text("Signed out. Your Microsoft 365 tools will reconnect next time you ask something."),
+            cancellationToken);
     }
 
     private static async Task WelcomeAsync(ITurnContext turnContext, ITurnState turnState, CancellationToken cancellationToken)
