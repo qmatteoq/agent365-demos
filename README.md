@@ -40,9 +40,26 @@ Switch to a `plain/*` branch to demo the "before" state, switch back to `main` f
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` |
 | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes |
-| Observability instrumentation | Yes | Yes |
+| Observability instrumentation | Yes | Yes, exported service-to-service |
 | WorkIQ mail / calendar / Teams tools | Yes | Wired, see the note below |
 | User authentication | Not applicable, no user context | On-Behalf-Of through Teams SSO |
+
+### How the Teams agent authenticates
+
+The agent uses two different identities, for two different jobs:
+
+- **The signed-in user**, through On-Behalf-Of, whenever it reads that user's data. WorkIQ tools
+  run this way so the agent can only see mail, calendar and Teams content the user could open
+  themselves.
+- **The agent's own identity**, for writing observability traces. The observability service binds
+  the caller to the agent named in the export route, and a delegated token's principal is the
+  human rather than the agent, so it answers `403`. The token is therefore minted through the
+  federated identity chain in
+  [`Observability/ObservabilityTokenService.cs`](./dotnet-agent-teams/Observability/ObservabilityTokenService.cs),
+  which produces a token whose subject is the agent.
+
+Traces reach the service over the service-to-service route. Delegated and service-to-service
+traces use different routes and do not accept each other's tokens, so the two have to agree.
 
 ### Known issue: WorkIQ tools on the Teams agent
 
