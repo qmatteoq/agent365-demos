@@ -7,6 +7,8 @@ using Microsoft.Agents.A365.Observability.Runtime.Common;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
 using Microsoft.Agents.A365.Runtime.Utils;
+// A365 WorkIQ - added by add-workiq-tools skill
+using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Builder.App;
@@ -43,6 +45,8 @@ public class LearnAgent : AgentApplication
     private readonly LearnAgentFactory _agentFactory;
     private readonly ConversationSessionStore _sessions;
     private readonly IExporterTokenCache<AgenticTokenStruct>? _tokenCache;
+    // A365 WorkIQ - added by add-workiq-tools skill
+    private readonly IMcpToolRegistrationService? _workIqTools;
     private readonly IConfiguration _configuration;
     private readonly ILogger<LearnAgent> _logger;
     private readonly string? _agenticAuthHandlerName;
@@ -53,12 +57,14 @@ public class LearnAgent : AgentApplication
         LearnAgentFactory agentFactory,
         ConversationSessionStore sessions,
         IExporterTokenCache<AgenticTokenStruct> tokenCache,
+        IMcpToolRegistrationService workIqTools,
         IConfiguration configuration,
         ILogger<LearnAgent> logger) : base(options)
     {
         _agentFactory = agentFactory;
         _sessions = sessions;
         _tokenCache = tokenCache;
+        _workIqTools = workIqTools;
         _configuration = configuration;
         _logger = logger;
 
@@ -318,7 +324,14 @@ public class LearnAgent : AgentApplication
         {
             var agent = _agentFactory.Get(resolvedAgentId);
             var session = await _sessions.GetOrCreateAsync(agent, conversationId, cancellationToken);
-            var response = await agent.RunAsync(question, session, cancellationToken: cancellationToken);
+
+            // A365 WorkIQ - added by add-workiq-tools skill.
+            // Resolved per turn rather than at startup: the tools are reached with a delegated
+            // token for the agent's own Agentic User, which only exists inside a turn.
+            var runOptions = await BuildWorkIqRunOptionsAsync(
+                turnContext, resolvedAgentId, authHandlerName, cancellationToken);
+
+            var response = await agent.RunAsync(question, session, runOptions, cancellationToken);
 
             var answer = string.IsNullOrWhiteSpace(response.Text)
                 ? "I couldn't find an answer to that in the Microsoft Learn documentation."
@@ -340,6 +353,55 @@ public class LearnAgent : AgentApplication
             {
                 // Expected - the loop is cancelled as soon as the answer is ready.
             }
+        }
+    }
+
+    /// <summary>
+    /// Resolves the WorkIQ MCP tools for this turn and returns run options carrying them.
+    /// Returns null when WorkIQ is unavailable, so the turn still runs on Microsoft Learn alone.
+    /// </summary>
+    /// <remarks>
+    /// A365 WorkIQ - added by add-workiq-tools skill.
+    /// Failure here is deliberately non-fatal. <c>GetMcpToolsAsync</c> first asks the tooling
+    /// gateway which servers this agent may use, at <c>/agents/v2/{agentId}/mcpServers</c>, and
+    /// that route is currently returning 500 for the other Teams agent in this repository. If it
+    /// fails the same way here, the agent degrades to Learn-only rather than failing the turn.
+    /// </remarks>
+    private async Task<AgentRunOptions?> BuildWorkIqRunOptionsAsync(
+        ITurnContext turnContext,
+        string? resolvedAgentId,
+        string? authHandlerName,
+        CancellationToken cancellationToken)
+    {
+        if (_workIqTools is null
+            || string.IsNullOrEmpty(resolvedAgentId)
+            || string.IsNullOrEmpty(authHandlerName))
+        {
+            // No agent identity or no auth handler means no delegated token can be obtained,
+            // which is the normal state in the Agents Playground.
+            return null;
+        }
+
+        try
+        {
+            var tools = await _workIqTools
+                .GetMcpToolsAsync(resolvedAgentId, UserAuthorization, authHandlerName, turnContext)
+                .ConfigureAwait(false);
+
+            if (tools is null || tools.Count == 0)
+            {
+                _logger.LogInformation("WorkIQ returned no tools for this turn.");
+                return null;
+            }
+
+            _logger.LogInformation("Loaded {Count} WorkIQ tools for this turn.", tools.Count);
+
+            return new ChatClientAgentRunOptions(_agentFactory.CreateChatOptions(tools));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not load WorkIQ tools; continuing with Microsoft Learn only.");
+            return null;
         }
     }
 

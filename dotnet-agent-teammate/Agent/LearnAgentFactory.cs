@@ -36,17 +36,37 @@ public sealed class LearnAgentFactory(
 
     private readonly ConcurrentDictionary<string, AIAgent> _agents = new();
 
+    /// <summary>
+    /// Builds a complete set of chat options, optionally adding tools resolved for the current turn.
+    /// </summary>
+    /// <remarks>
+    /// Per-run options replace rather than merge with the agent's own options, so the instructions
+    /// and the Microsoft Learn tools have to be repeated here - dropping them would leave a turn
+    /// with WorkIQ tools but no Learn tools and no instructions.
+    /// </remarks>
+    public ChatOptions CreateChatOptions(IEnumerable<AITool>? additionalTools = null)
+    {
+        var tools = learnMcpTools.Tools.Cast<AITool>().ToList();
+
+        if (additionalTools is not null)
+        {
+            tools.AddRange(additionalTools);
+        }
+
+        return new ChatOptions
+        {
+            Instructions = Instructions,
+            Tools = tools,
+        };
+    }
+
     public AIAgent Get(string? agentId) =>
         _agents.GetOrAdd(agentId ?? string.Empty, id =>
         {
             var options = new ChatClientAgentOptions
             {
                 Name = "LearnTeammateAgent",
-                ChatOptions = new ChatOptions
-                {
-                    Instructions = Instructions,
-                    Tools = learnMcpTools.Tools.Cast<AITool>().ToList(),
-                },
+                ChatOptions = CreateChatOptions(),
             };
 
             if (!string.IsNullOrEmpty(id))

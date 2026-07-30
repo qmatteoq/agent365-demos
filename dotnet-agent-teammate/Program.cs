@@ -6,6 +6,9 @@ using Microsoft.Agents.Builder;
 using Microsoft.Agents.Hosting.AspNetCore;
 using Microsoft.Agents.Storage;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
+// A365 WorkIQ - added by add-workiq-tools skill
+using Microsoft.Agents.A365.Tooling.Services;
+using Microsoft.Agents.A365.Tooling.Extensions.AgentFramework.Services;
 using Microsoft.Extensions.AI;
 using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
@@ -99,6 +102,12 @@ builder.Services.AddSingleton<IChatClient>(sp =>
 });
 
 builder.Services.AddSingleton<LearnAgentFactory>();
+
+// A365 WorkIQ - added by add-workiq-tools skill.
+// Singleton rather than the AddMcpServices() one-liner, which registers these as scoped:
+// LearnAgent is a singleton, so a scoped registration would be captured and go stale.
+builder.Services.AddSingleton<IMcpToolServerConfigurationService, McpToolServerConfigurationService>();
+builder.Services.AddSingleton<IMcpToolRegistrationService, McpToolRegistrationService>();
 
 // Conversation sessions are kept per Teams conversation so the agent has multi-turn memory.
 builder.Services.AddSingleton<ConversationSessionStore>();
