@@ -46,7 +46,11 @@ happily hand back a token from whichever tenant it last used, and Azure OpenAI t
 ## Running
 
 Open **this folder** in VS Code and press <kbd>F5</kbd>. That syncs dependencies, starts the app
-with the debugger attached, and opens the browser on <http://127.0.0.1:8000>.
+with the debugger attached, and opens whatever url uvicorn prints — normally
+<http://127.0.0.1:8000>.
+
+⚠️ **Change that to <http://localhost:8000> before signing in.** The two are different cookie hosts
+and the registered redirect URI uses `localhost`; see [Sign in on `localhost`](#sign-in-on-localhost).
 
 From a terminal instead:
 
@@ -120,7 +124,13 @@ That user token is the assertion for the agent on-behalf-of chain:
 2. **Hop 2** - agent identity + T1 as `client_assertion` + the user token as
    `assertion` -> Observability API token.
 
-Both hops are plain HTTP POSTs because MSAL Python does not serialise `fmi_path`.
+Both hops are plain HTTP POSTs. That is a historical choice rather than a
+limitation: MSAL Python 1.37 does support `fmi_path` on `acquire_token_for_client`,
+as `python-agent-teams/app/a365/fmi.py` shows. Hop 2 here is an on-behalf-of grant
+rather than a client-credentials one, so the two chains are not interchangeable, but
+hop 1 could be rewritten on MSAL. Earlier revisions of this file claimed MSAL Python
+cannot serialise `fmi_path`; that was wrong.
+
 The result is a token for *the agent acting for the user*, which is what the backend
 requires - a plain delegated user token is rejected, because its principal is the human
 rather than the agent.

@@ -10,8 +10,11 @@ is what the Agent 365 observability backend requires: it binds the caller to the
 in the export route. A plain delegated user token is rejected with HTTP 403 because its
 principal is the human, not the agent.
 
-Both hops are issued with a direct HTTP POST rather than MSAL, because MSAL Python does
-not serialise the ``fmi_path`` parameter.
+Both hops are issued with a direct HTTP POST rather than MSAL. That is a historical
+choice, not a limitation of MSAL: MSAL Python 1.37 accepts ``fmi_path`` on
+``acquire_token_for_client`` (see ``python-agent-teams/app/a365/fmi.py``). Hop 2 here is
+an on-behalf-of grant, which MSAL exposes separately as
+``acquire_token_on_behalf_of``.
 
 See https://learn.microsoft.com/entra/agent-id/agent-on-behalf-of-oauth-flow
 """
