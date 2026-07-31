@@ -245,12 +245,18 @@ az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
 > Token Service issues the token to the bot app. So the route carries the bot app's client id and
 > the two agree.
 >
-> ✅ **And that does not orphan the traces — confirmed in MAC.** They appear attributed to
-> **`dotnet-agent-teams Identity`** (the agent identity's display name), carrying
-> `TargetAgentId` = `0cf93255-…` and `TargetAgentBlueprintId` = `f56c2c54-…`. The service resolves
-> the bot app id back to the registered agent. The route id is a routing key, not the reported
-> identity — which is why exporting under the bot app is safe for a CLI-registered agent that also
-> has an agent identity.
+> ✅ **And that does not orphan the traces — confirmed in MAC.** The portal groups and labels them
+> under **`dotnet-agent-teams Identity`** (the agent identity's display name), carrying
+> `TargetAgentId` = `0cf93255-…` and `TargetAgentBlueprintId` = `f56c2c54-…`. The label is the
+> *identity's* name, not the bot app's — which is "dotnet-agent-teams **Bot**" — so the service is
+> resolving past the transport id to the registered agent, not echoing it. The route id is a routing
+> key, not the reported identity, which is why exporting under the bot app is safe for a
+> CLI-registered agent that also holds an agent identity.
+>
+> Worth being explicit, because it surprises people: on this path the spans really do carry the
+> **bot app id** in `gen_ai.agent.id`, not the agent identity. The distro reads the span attribute,
+> the URL segment and the token-cache key from one value, so they cannot diverge — and the token can
+> only be issued to the bot app here. The agent identity reappears at the reporting layer.
 >
 > **Two traps on the way in.** The distro's `AgenticTokenCache` looks like the OBO answer and the
 > `instrument-observability` skill points at it; it performs a plain on-behalf-of exchange through

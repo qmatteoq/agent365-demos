@@ -241,14 +241,18 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 > the token to the bot app, so the route carries the bot app's client id and the two agree.
 >
 > ✅ **Confirmed end to end in MAC.** Exporting under the bot app id does *not* orphan the traces.
-> They surface attributed to **`dotnet-agent-teams Identity`** — the Agent 365 agent identity's
-> display name — with `TargetAgentId` = the bot app id and `TargetAgentBlueprintId` = the blueprint.
-> The service resolves the bot app id back to the registered agent, so the id in the export route is
-> a *routing* key, not the identity the agent is reported as. This was the one thing the HTTP 200
-> could not tell us, and it settles the question in favour of the documented path.
+> The portal groups and labels them under **`dotnet-agent-teams Identity`** — the Agent 365 agent
+> identity's display name — with `TargetAgentId` = the bot app id and `TargetAgentBlueprintId` =
+> the blueprint. Note the label is the *identity's* name, not the bot app's (which is
+> "dotnet-agent-teams **Bot**"), so the service is resolving past the transport id to the registered
+> agent rather than echoing it. The id in the export route is a *routing* key, not the identity the
+> agent is reported as. This was the one thing HTTP 200 could not tell us, and it settles the
+> question in favour of the documented path.
 >
-> It also makes **`.AgentBlueprintId()` in baggage load-bearing** rather than cosmetic: the
-> blueprint id is what appears as `TargetAgentBlueprintId` and ties the traces to the registration.
+> *Inferred, not verified:* the resolution most likely runs through `TargetAgentBlueprintId` — the
+> blueprint owns the agent identity, and the blueprint id reaches the service only because
+> `.AgentBlueprintId()` puts it in baggage. If so, that call is load-bearing rather than cosmetic.
+> To test, drop it from baggage for one turn and see whether the trace loses its agent name.
 >
 > Two traps on the way in, both of which cost this repo a rebuild:
 > - The distro's **`AgenticTokenCache`** looks like the OBO answer and the `instrument-observability`
