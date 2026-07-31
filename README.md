@@ -235,6 +235,29 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 > and the docs are explicit: *the `agentId` in the token cache must match the app registration's
 > Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
 >
+> **"Agent 365-enabled" does not mean "registered with Agent 365", and that is the single most
+> confusing thing on this page.** All five agents here are registered, hold blueprints, and appear
+> in the admin center. The doc's term refers to how the turn *arrives*. Registration and agent type
+> are separate axes:
+>
+> | | agents 2 & 4 | agent 5 |
+> |---|---|---|
+> | Registered in A365 / governed | yes | yes |
+> | Agent type | M365 **custom engine agent** | **AI teammate** |
+> | Invoked as | its own Entra app (the bot) | the agentic app |
+> | Turn carries `agenticAppId` | no | yes |
+> | Recommended scenario | Custom engine + OBO | Agent 365-enabled + OBO |
+>
+> [Get started with Agent 365 development](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
+> confirms the design: *"Register your agent using your existing Microsoft Entra application
+> registration **or** a blueprint"*, and *"Microsoft 365 custom engine agents are already
+> discoverable today using their existing Microsoft Entra application registration."* For a custom
+> engine agent the **Entra app registration is the identity the platform knows it by** — so
+> exporting under it is the registration identity, not a workaround. The same page names the upgrade
+> that changes this: *"AI teammate for Microsoft 365 custom engine agents requires an agent identity
+> blueprint"* — which is what `dotnet-agent-teammate` is. Running under its own identity is an agent
+> *type* change, not an instrumentation change.
+>
 > The export route authorises on the token's `azp`, which must equal the agent id in the URL.
 > Probed on the live endpoint with one token against three ids — agent identity **403**, blueprint
 > **403**, bot app **415** (authorised, wrong content type). On this path the Token Service issues
