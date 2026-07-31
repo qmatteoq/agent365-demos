@@ -47,7 +47,7 @@ this setup:
 
 | Identity | App id | Job |
 |---|---|---|
-| Bot channel app | `d1fbe2ae-6c95-492f-b34a-f14451b994f5` | Authenticates the Teams channel and signs outbound replies |
+| Bot channel app | `d1fbe2ae-6c95-492f-b34a-f14451b994f5` | Authenticates the Teams channel, signs outbound replies, and is hop 1 of the observability token chain |
 | Teams app | `d80a2cae-b655-487a-82be-8bf9271e1d8e` | Identifies the app in the Teams catalogue |
 
 The bot channel app is a plain single-tenant Entra app, **not** an Agent 365 blueprint. Entra
@@ -206,9 +206,23 @@ channel app, and hop 3 only accepts an assertion issued to the blueprint family.
 > | blueprint | **403** |
 > | bot channel app (the token's `azp`) | **415** — authorised, wrong content type |
 >
-> So the id in the route must equal the token's `azp`. Posting under the bot app id would
-> "work" but file the traces against the wrong agent. The fix is to make the token's `azp`
-> *be* the agent identity — hence the three-hop chain above.
+> So the id in the route must equal the token's `azp`. That leaves **two valid wirings**, and this
+> repo deliberately uses the second:
+>
+> 1. **Post under the bot app id** — the path Microsoft documents for a
+>    [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo).
+>    Set the Azure Bot OAuth connection's **Scopes** to
+>    `api://9b975845-…/Agent365.Observability.OtelWrite`, add `SCOPES` and `TYPE=UserAuthorization`
+>    to the handler, and a single `AGENT_APP.auth.get_token(context, "OBO")` returns a token already
+>    scoped to the observability API — the Bot Framework Token Service does the exchange. Cache it
+>    under the **app registration's client id**, which is then the id in the export route. No MSAL,
+>    no `fmi_path`, no blueprint secret.
+> 2. **Make the token's `azp` be the agent identity** — the three-hop chain above, so the route can
+>    carry the Agent 365 **agent identity** that `a365 setup all` registered.
+>
+> Both return 200. This repo takes route 2 so every agent reports under its A365 agent identity, at
+> the cost of more code. **Which id Defender and the Admin Center prefer for a custom engine agent
+> is not something this repo has verified**; for the documented, minimal path, take route 1.
 
 > The blueprint never performs the final exchange itself: Entra bars agentic applications
 > from client-credentials flows (`AADSTS82001`). It only proves ownership at hop 2.
@@ -221,6 +235,13 @@ The exporter flushes on a background thread with no turn context, so it cannot r
 chain itself. The token is minted in the message handler, while the user's assertion is
 still in hand, and deposited in `app/a365/token_store.py` for the exporter's resolver to
 read back. It is cached until five minutes before expiry, so most turns cost nothing.
+
+**Previous implementation.** This agent originally used the S2S shape
+(`a365_use_s2s_endpoint=True`, a background refresh loop holding a client-credentials
+token). That worked — exports returned 200 — but the token's principal was the agent
+alone, with no user in it, which is the wrong shape for an agent that has a human on every
+turn. The auth mode is decided by whether a user is in the loop at runtime, not by where
+the agent is hosted. The S2S version is preserved on the **`s2s/teams-agents`** branch.
 
 ### Instrumentation notes
 

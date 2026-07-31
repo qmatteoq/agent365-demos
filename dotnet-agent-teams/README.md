@@ -1,7 +1,7 @@
 # Microsoft Learn agent — .NET, Agent Framework, Teams
 
 A research agent for the Microsoft ecosystem, grounded in the official
-[Microsoft Learn MCP server](https://learn.microsoft.com/api/mcp). It answers questions about
+[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp). It answers questions about
 Azure, Microsoft 365, Power Platform, .NET, Entra, Copilot and Dynamics 365, and cites the
 documentation it used.
 
@@ -10,8 +10,8 @@ This is the second agent in this repo. Same agent core as
 365 Copilot** through the **Microsoft 365 Agents SDK** instead of a Blazor app — the .NET
 counterpart of [`python-agent-teams`](../python-agent-teams).
 
-It is onboarded to Agent 365 as a **system agent** with observability exported
-**service-to-service**. The AI Teammate variant of the same agent is
+It is onboarded to Agent 365 as a **system agent**, with observability exported
+**on-behalf-of the signed-in user**. The AI Teammate variant of the same agent is
 [`dotnet-agent-teammate`](../dotnet-agent-teammate); comparing the two is the point of having both.
 
 |  |  |
@@ -131,8 +131,8 @@ Three applications are involved, and conflating them is the fastest way to break
 
 | Identity | App id | Job |
 |---|---|---|
-| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` | Validates the inbound Teams token, signs outbound replies, and is hop 1 of the WorkIQ chain |
-| Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` | Hop 1 of the observability chain, hop 2 of the WorkIQ chain |
+| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` | Validates the inbound Teams token, signs outbound replies, and is hop 1 of both token chains |
+| Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` | Hop 2 of both chains — proving it owns the agent identity |
 | Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` | The principal every outbound A365 token finally belongs to |
 
 The bot channel app is a plain single-tenant Entra app, **not** a blueprint. Entra bars agentic
@@ -152,9 +152,9 @@ carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects
 |---|---|
 | `AzureOpenAI:Endpoint` / `Deployment` / `TenantId` | The model the agent reasons with |
 | `LearnMcp:Endpoint` | Microsoft Learn MCP server |
-| `Connections:BotConnection` | Bot channel app — channel auth and WorkIQ hop 1 |
-| `Connections:ServiceConnection` | Blueprint — governance, WorkIQ, observability |
-| `Agent365Observability:*` | Identity and credentials for the exporter's token chain |
+| `Connections:BotConnection` | Bot channel app — channel auth, and hop 1 of both token chains |
+| `Connections:ServiceConnection` | The blueprint, as written by `a365 setup all`. `ConnectionsMap` routes all traffic to `BotConnection`, and both token chains read their blueprint credentials from `Agent365Observability:*`, so nothing in this agent's own code uses it. It is referenced by the `agentic` auth handler, which this agent does not use — see `dotnet-agent-teammate` for one that does. |
+| `Agent365Observability:*` | Identity and credentials for both token chains — the agent id, the blueprint id and the blueprint secret |
 
 **No secret belongs in `appsettings.json`.** Use `dotnet user-secrets`.
 
@@ -220,10 +220,28 @@ which is what makes this path work at all.
 > | blueprint `f56c2c54-…` | **403** |
 > | bot channel app `0cf93255-…` (the token's `azp`) | **415** — authorised, wrong content type |
 >
-> So the id in the route must equal the token's `azp`. Posting under the bot app id would "work" but
-> would attribute traces to an app that Agent 365 does not know as an agent, splitting this agent's
-> reporting history. The fix is to make the token's `azp` *be* the agent identity — hence the
-> three-hop chain above rather than `AgenticTokenCache`.
+> So the id in the route must equal the token's `azp`. That leaves **two valid wirings**, and this
+> repo deliberately uses the second:
+>
+> 1. **Post under the bot app id.** This is what Microsoft documents for a
+>    [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo):
+>    set the Azure Bot OAuth connection's **Scopes** to
+>    `api://9b975845-…/Agent365.Observability.OtelWrite`, call `GetTurnTokenAsync` once — the Bot
+>    Framework Token Service performs the OBO exchange internally — and cache the result under the
+>    **app registration's client id**, which is then the id in the export route. No MSAL, no FMI
+>    chain, no blueprint secret. The docs are explicit that a mismatch here is what causes the 403.
+> 2. **Make the token's `azp` be the agent identity.** The three-hop chain above, so the route can
+>    carry the Agent 365 **agent identity** — the same id `a365 setup all` registered and the one the
+>    other agents in this repo are filed under.
+>
+> Both return 200; the probe above shows the service accepts either, provided the route and the
+> token agree. This repo takes route 2 for consistency — every agent here reports under its A365
+> agent identity — at the cost of more code. **Which id Defender and the Admin Center prefer for a
+> custom engine agent is not something this repo has verified**; if you want the documented,
+> minimal path, take route 1.
+>
+> The 403 seen from the distro's `AgenticTokenCache` is precisely the mismatch the docs warn about:
+> the cache's token has `azp` = the bot app, while the route carried the agent identity.
 >
 > Note that the blueprint never performs the final exchange itself; agentic apps are barred from
 > client-credentials flows (`AADSTS82001`). It only proves ownership of the agent identity at hop 2.
@@ -233,7 +251,8 @@ which is what makes this path work at all.
 token). That worked — exports returned 200 — but the token's principal was the agent alone, with no
 user in it, which is the wrong shape for an agent that has a human on every turn. Microsoft's
 guidance picks the auth mode on whether a user is in the loop at runtime, not on where the agent is
-hosted. The S2S version is preserved on the `a365/dotnet-agent-teams` branch.
+hosted. The S2S version is preserved on the **`s2s/teams-agents`** branch, which is the last commit
+where both Teams agents still used it.
 
 Per turn, in `Agent/LearnAgent.cs`:
 

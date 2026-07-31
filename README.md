@@ -4,7 +4,8 @@ A collection of demo agents used to showcase **Agent 365** onboarding.
 
 Every agent shares the same functional goal: it is a research assistant for the Microsoft ecosystem,
 grounding its answers in the official
-[Microsoft Learn MCP server](https://learn.microsoft.com/api/mcp). What changes between them is the
+[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp)
+(`https://learn.microsoft.com/api/mcp`, streamable HTTP). What changes between them is the
 technology used to build the agent.
 
 ## Agents
@@ -26,6 +27,7 @@ having both.
 
 - **`main`** — the Agent 365 *instrumented* version of each agent (identity, blueprint, observability).
 - **`plain/<name>`** — a snapshot of the same agent *before* Agent 365 onboarding.
+- **`a365/<name>`** — the same agent immediately *after* onboarding, before later refinements.
 
 | Branch | Contents |
 | --- | --- |
@@ -39,6 +41,10 @@ having both.
 | `a365/python-agent-teams` | `python-agent-teams`, after onboarding (merged into `main`) |
 | `plain/dotnet-agent-teammate` | `dotnet-agent-teammate`, before onboarding |
 | `a365/dotnet-agent-teammate` | `dotnet-agent-teammate`, after onboarding (merged into `main`) |
+| `s2s/teams-agents` | Both Teams agents while they still exported **service-to-service**, kept as a reference for that shape. See [below](#three-ways-to-authenticate-the-observability-exporter) for why they moved to on-behalf-of. |
+
+> The two Teams agents' `plain/` and `a365/` branches are named `plain/teams-agent` and
+> `a365/teams-agent` for the .NET one — a leftover from before the folder was renamed.
 
 This makes the onboarding work visible as a diff:
 
@@ -196,17 +202,16 @@ depends on whether a human is signed in, and on whether the agent has an identit
 > bot app **415** (authorised, wrong content type). The working chain therefore ends in an exchange
 > performed *by the agent identity for the user*, giving `azp` = agent identity and the human as
 > subject. See [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
+>
+> Microsoft documents a **simpler alternative** for this exact scenario — scope the Azure Bot OAuth
+> connection to the observability API and post under the **bot app's client id** instead, with no
+> MSAL chain at all
+> ([custom engine using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo)).
+> Both wirings return 200; these agents use the FMI chain so that every agent in the repo reports
+> under its A365 agent identity. Each agent's README sets out the trade-off.
 
 In the web-hosted case a plain delegated user token is rejected by the export route, because its
 principal is the human rather than the agent.
-
-The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
-behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from
-requesting app-only tokens at all (**`AADSTS82001`**). Its tokens come from
-`UserAuthorization.ExchangeTurnTokenAsync(turnContext, "agentic", …)`, which runs a three-hop chain
-ending in a `grant_type=user_fic` exchange. That last hop is *delegated*, for the Agentic User
-rather than for a human. See
-[`dotnet-agent-teammate/README.md`](./dotnet-agent-teammate/README.md) for the full chain.
 
 The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
 behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from

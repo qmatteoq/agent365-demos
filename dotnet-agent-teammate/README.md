@@ -1,7 +1,7 @@
 # Microsoft Learn agent — .NET, Agent Framework, AI Teammate
 
 A research agent for the Microsoft ecosystem, grounded in the official
-[Microsoft Learn MCP server](https://learn.microsoft.com/api/mcp). It answers questions about
+[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp). It answers questions about
 Azure, Microsoft 365, Power Platform, .NET, Entra, Copilot and Dynamics 365, and cites the
 documentation it used.
 
@@ -154,7 +154,7 @@ apply here:
 | Bot channel app + blueprint, kept strictly separate | Blueprint only |
 | Blueprint can't sign channel replies (`AADSTS82001`) | Not applicable — no channel app to sign as |
 | `a365 setup all` overwrites the bot credentials in place | No bot credentials to overwrite |
-| Observability exported service-to-service | Agentic User identity |
+| Observability exported on-behalf-of the human | Agentic User identity |
 | WorkIQ blocked on a service-side 500 | WorkIQ works |
 
 ## Agent 365
@@ -213,9 +213,9 @@ Wired in `Program.cs` and `Agent/LearnAgent.cs`:
   the documentation, `UseMicrosoftOpenTelemetry` does **not** register
   `IExporterTokenCache<AgenticTokenStruct>` itself in `Microsoft.OpenTelemetry` 1.0.7 — without
   registering it manually the host fails to start.
-- **`UseS2SEndpoint` is left at its default.** The agentic-user path posts to `/observability/`;
-  the S2S route is for the FMI chain that `dotnet-agent-teams` uses, and the two routes do not
-  accept each other's tokens.
+- **`UseS2SEndpoint` is left at its default.** The agentic-user path posts to `/observability/`.
+  So does every other agent in this repo — the `/observabilityService/` route is for application
+  tokens, and the two routes do not accept each other's tokens.
 - **`BaggageBackfillProcessor` is registered before the distro**, and the order is load-bearing.
   See [why the inference span needs it](#why-the-inference-span-needs-a-backfill-processor).
 

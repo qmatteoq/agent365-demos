@@ -1,7 +1,7 @@
 # Microsoft Learn agent — .NET, Agent Framework, Blazor web app
 
 A research agent for the Microsoft ecosystem, grounded in the official
-[Microsoft Learn MCP server](https://learn.microsoft.com/api/mcp). It answers questions about
+[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp). It answers questions about
 Azure, Microsoft 365, Power Platform, .NET, Entra, Copilot and Dynamics 365, and cites the
 documentation it used.
 

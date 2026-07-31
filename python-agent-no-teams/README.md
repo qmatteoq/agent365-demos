@@ -1,7 +1,7 @@
 # python-agent-no-teams
 
 A Microsoft ecosystem research assistant built with **LangChain (Python)**, **Azure OpenAI** and the
-official [Microsoft Learn MCP server](https://learn.microsoft.com/api/mcp), served as a small
+official [Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp), served as a small
 **FastAPI** web app with a chat page.
 
 It is the Python counterpart of [`dotnet-agent-no-teams`](../dotnet-agent-no-teams): same behaviour,
