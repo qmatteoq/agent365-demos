@@ -167,9 +167,11 @@ carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects
 | Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` |
 | Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` |
 
-When hunting traces in Defender, filter on the **bot channel app id** — that is the id the export
-route carries, for the reasons set out under [How observability is instrumented](#how-observability-is-instrumented).
-The agent identity and blueprint are still the ids Agent 365 registered the agent under.
+When hunting traces in Defender, look for **`dotnet-agent-teams Identity`** — the Agent 365 agent
+identity's display name. That is how they are attributed, *even though* the export route carries the
+bot channel app id: the service resolves the bot app id back to the registered agent. Confirmed in
+MAC — the rows carry `TargetAgentId` = `0cf93255-…` (bot app) and `TargetAgentBlueprintId` =
+`f56c2c54-…` (blueprint). The id in the route is a routing key, not the reported identity.
 
 ### How observability is instrumented
 
@@ -242,6 +244,13 @@ az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
 > On this path nothing can make the token's `azp` be the Agent 365 agent identity, because the
 > Token Service issues the token to the bot app. So the route carries the bot app's client id and
 > the two agree.
+>
+> ✅ **And that does not orphan the traces — confirmed in MAC.** They appear attributed to
+> **`dotnet-agent-teams Identity`** (the agent identity's display name), carrying
+> `TargetAgentId` = `0cf93255-…` and `TargetAgentBlueprintId` = `f56c2c54-…`. The service resolves
+> the bot app id back to the registered agent. The route id is a routing key, not the reported
+> identity — which is why exporting under the bot app is safe for a CLI-registered agent that also
+> has an agent identity.
 >
 > **Two traps on the way in.** The distro's `AgenticTokenCache` looks like the OBO answer and the
 > `instrument-observability` skill points at it; it performs a plain on-behalf-of exchange through

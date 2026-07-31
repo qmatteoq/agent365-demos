@@ -201,13 +201,13 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 (`agenticAppId` / `agenticUserId`) from the Agent 365 platform, and is the token **delegated** or
 **app-only**?
 
-| Agent | Documented scenario | Export id |
-|---|---|---|
-| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache`, no custom resolver | agentic instance id from the activity |
-| `dotnet-agent-teams` | **Custom engine using OBO** — Azure Bot OAuth connection scoped to the observability API | bot app client id |
-| `python-agent-teams` | **Custom engine using OBO** | bot app client id |
-| `dotnet-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity |
-| `python-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity |
+| Agent | Documented scenario | Export id | Reported in MAC as |
+|---|---|---|---|
+| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache`, no custom resolver | agentic instance id from the activity | its agentic user |
+| `dotnet-agent-teams` | **Custom engine using OBO** — Azure Bot OAuth connection scoped to the observability API | bot app client id | **the agent identity** (service resolves it) |
+| `python-agent-teams` | **Custom engine using OBO** | bot app client id | **the agent identity** (service resolves it) |
+| `dotnet-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity | not yet observed |
+| `python-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity | not yet observed |
 
 > The two **web-hosted** agents fall outside the taxonomy, and this is worth being explicit about
 > rather than pretending otherwise. All four documented scenarios assume an Agents SDK / Bot
@@ -238,8 +238,17 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 > The export route authorises on the token's `azp`, which must equal the agent id in the URL.
 > Probed on the live endpoint with one token against three ids — agent identity **403**, blueprint
 > **403**, bot app **415** (authorised, wrong content type). On this path the Token Service issues
-> the token to the bot app, so the route carries the bot app's client id and the two agree. **Traces
-> for these two agents are therefore filed under the bot app id, not the Agent 365 agent identity.**
+> the token to the bot app, so the route carries the bot app's client id and the two agree.
+>
+> ✅ **Confirmed end to end in MAC.** Exporting under the bot app id does *not* orphan the traces.
+> They surface attributed to **`dotnet-agent-teams Identity`** — the Agent 365 agent identity's
+> display name — with `TargetAgentId` = the bot app id and `TargetAgentBlueprintId` = the blueprint.
+> The service resolves the bot app id back to the registered agent, so the id in the export route is
+> a *routing* key, not the identity the agent is reported as. This was the one thing the HTTP 200
+> could not tell us, and it settles the question in favour of the documented path.
+>
+> It also makes **`.AgentBlueprintId()` in baggage load-bearing** rather than cosmetic: the
+> blueprint id is what appears as `TargetAgentBlueprintId` and ties the traces to the registration.
 >
 > Two traps on the way in, both of which cost this repo a rebuild:
 > - The distro's **`AgenticTokenCache`** looks like the OBO answer and the `instrument-observability`

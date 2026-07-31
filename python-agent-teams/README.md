@@ -236,6 +236,12 @@ connection left on the default `api://botid-…/defaultScopes` produces **401 In
 >
 > On this path nothing can make `azp` be the Agent 365 agent identity: the Token Service issues the
 > token to the bot app. So the route carries the bot app's client id and the two agree.
+>
+> ✅ **And that does not orphan the traces.** Confirmed in MAC on the .NET sibling, which uses the
+> identical wiring: traces appear attributed to the **agent identity's display name**, carrying
+> `TargetAgentId` = the bot app id and `TargetAgentBlueprintId` = the blueprint. The service
+> resolves the bot app id back to the registered agent, so the route id is a routing key rather
+> than the reported identity.
 
 > 🪤 **`AgentDetails` alone is not enough — baggage carries the id too.** Auto-instrumented
 > LangChain and LLM spans read `gen_ai.agent.id` from **baggage**, not from the invoke scope.
