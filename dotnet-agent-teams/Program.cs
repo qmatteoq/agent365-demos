@@ -21,20 +21,22 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient();
 
-// A365 Observability — best-effort instrumentation (verify against official sample)
-// Registers the span exporter's token cache and the background service that keeps it filled.
-// The exporter authenticates as the agent identity rather than as the signed-in user: the
-// observability backend requires the token's principal to match the agent in the export route,
-// which a delegated on-behalf-of token cannot satisfy. See ObservabilityTokenService.
-builder.Services.AddAgent365Observability();
-
-// A365 Observability — best-effort instrumentation (verify against official sample)
-// Configures the OpenTelemetry pipeline and the Agent 365 span exporter in one call. Traces are
-// exported to Agent 365 (and surface in Microsoft Defender / the Microsoft Admin Center); in
-// development they are mirrored to the console so a local run can be inspected immediately.
-// The cache is resolved after Build(), so the resolver closes over the variable rather than
-// capturing its (still null) value here.
-IExporterTokenCache<string>? observabilityTokenCache = null;
+// A365 Observability — OBO path (authMode: obo)
+// The exporter posts traces with a delegated token so the trace is written under the identity of
+// the person who asked, rather than under a service principal.
+//
+// It does NOT use the distro's AgenticTokenCache. That performs a plain on-behalf-of exchange
+// through the bot channel app, so the token comes back with azp = the bot app, and the export
+// route rejects it with HTTP 403: the service requires the agent id in the URL to match the
+// token's client. Verified by probing the live endpoint with one token against three ids -
+// agent identity 403, blueprint 403, bot app 415 (i.e. authorised, wrong content type).
+//
+// WorkIqTokenService already mints exactly the right shape for the WorkIQ servers - a three-hop
+// chain ending in an exchange performed BY the agent identity FOR the user - so the observability
+// token is minted the same way. That yields azp = agent identity and the user as subject, which
+// satisfies both the route and caller attribution.
+var observabilityTokenStore = new ObservabilityTokenStore();
+builder.Services.AddSingleton(observabilityTokenStore);
 
 // Registered before UseMicrosoftOpenTelemetry so this processor sits ahead of the Agent 365 export
 // processor in the pipeline: OnEnd runs in registration order, and the identity has to be on the
@@ -55,14 +57,13 @@ builder.UseMicrosoftOpenTelemetry(o =>
     o.Instrumentation.EnableHttpClientInstrumentation = true;
     o.Instrumentation.EnableAzureSdkInstrumentation = true;
 
-    // Service-to-service traces go to a different route than the delegated ones, and the two do
-    // not accept each other's tokens. The distro leaves this off, so it has to be set explicitly.
-    o.Agent365.UseS2SEndpoint = true;
+    // Left at its default (false) on the OBO path: the delegated token is accepted by
+    // /observability/, not the /observabilityService/ route the S2S token targets.
 
-    o.Agent365.TokenResolver = async (agentId, tenantId) =>
-        observabilityTokenCache is not null
-            ? await observabilityTokenCache.GetObservabilityToken(agentId, tenantId)
-            : null;
+    // The exporter flushes on a background loop with no user context, so the token is deposited
+    // by the turn and read back here.
+    o.Agent365.TokenResolver = (agentId, tenantId) =>
+        Task.FromResult(observabilityTokenStore.Get(agentId, tenantId));
 });
 
 var aoaiEndpoint = builder.Configuration["AzureOpenAI:Endpoint"]
@@ -169,10 +170,6 @@ builder.AddAgentApplicationOptions();
 builder.AddAgent<LearnAgent>();
 
 var app = builder.Build();
-
-// A365 Observability — best-effort instrumentation (verify against official sample)
-// Completes the exporter's token resolver now that the container exists.
-observabilityTokenCache = app.Services.GetService<IExporterTokenCache<string>>();
 
 // The Agents SDK channel endpoint. Teams, Microsoft 365 Copilot and the Agents Playground
 // all deliver activities here.

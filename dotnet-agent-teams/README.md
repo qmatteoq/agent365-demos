@@ -162,7 +162,7 @@ carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects
 
 | | |
 |---|---|
-| Auth mode | `s2s` (service-to-service) |
+| Auth mode | `obo` (on-behalf-of, delegated) |
 | Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` |
 | Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` |
 | Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` |
@@ -171,48 +171,69 @@ When hunting traces in Defender, filter on the **agent identity**, not the bluep
 
 ### How observability is instrumented
 
-Wired in `Program.cs` and `Observability/`:
+Wired in `Program.cs`, `Agent365/` and `Observability/`:
 
-- **`builder.Services.AddAgent365Observability()`** registers `ObservabilityTokenService` as a
-  hosted service, but only when `Agent365Observability` is completely configured (tenant, agent id,
-  client id, and either a managed identity or a secret). An incomplete config leaves it unstarted
-  rather than failing at runtime.
 - **`builder.UseMicrosoftOpenTelemetry(...)`** sets `o.Exporters` to
   `ExportTarget.Agent365 | ExportTarget.Console` in Development and `ExportTarget.Agent365` in
   Production — the Agent 365 export is **never** disabled.
-- **`o.Agent365.UseS2SEndpoint = true`.** This is the key difference from the two OBO agents.
-  Service-to-service traces go to a different route than delegated ones, and the routes do not
-  accept each other's tokens. The distro leaves this off by default, so it must be set explicitly.
+- **`o.Agent365.UseS2SEndpoint` is left at its default (`false`).** The delegated token is accepted
+  by `/observability/`, not the `/observabilityService/` route an S2S token targets. The two routes
+  do not accept each other's tokens.
 - **Infrastructure instrumentation is re-enabled explicitly** (`EnableAspNetCoreInstrumentation`,
   `EnableHttpClientInstrumentation`, `EnableAzureSdkInstrumentation`), because exporting to
   Agent 365 alone otherwise suppresses it.
 - **The agent id is pinned** to `Agent365Observability:AgentId`. Left unset, the SDK generates a
   fresh GUID per agent and the exporter emits orphan identity groups.
-- **`o.Agent365.TokenResolver`** reads from an `IExporterTokenCache<string>` (`ServiceTokenCache`)
-  that `ObservabilityTokenService` refills every 50 minutes, retrying after a minute on failure.
-  The exporter flushes on a background loop with no turn context, so the token has to be waiting
-  for it.
+- **`o.Agent365.TokenResolver`** reads from `Agent365/ObservabilityTokenStore.cs`. The exporter
+  flushes on a background loop with no turn context, so the token cannot be minted there: each turn
+  deposits one in the store and the resolver reads it back. This is the same store the non-Teams
+  agent uses.
 
-**The token chain** (`Observability/ObservabilityTokenService.cs`) — MSAL, not raw HTTP:
+**The token chain** (`Agent365/WorkIqTokenService.cs`, `GetTokenForScopeAsync`) — the same three
+hops that mint the WorkIQ tokens, with a different scope:
 
-1. **Blueprint** + secret (or managed identity), `WithFmiPath(<agent identity>)`, scope
-   `api://AzureADTokenExchange/.default` → an assertion. If managed identity fails it falls back to
-   the client secret.
-2. **Agent identity** authenticates with that assertion as its client credential, scope
-   `api://9b975845-388f-4429-889e-eab1ef63949c/.default` → the Observability API token.
+1. **Bot channel app** exchanges the user's Teams SSO token for the blueprint's
+   `access_agent_as_user` scope. The Azure Bot OAuth connection issues a token whose audience is the
+   channel app, and the final exchange only accepts an assertion issued to the blueprint family.
+2. **Blueprint** + secret, `fmi_path=<agent identity>`, scope `api://AzureADTokenExchange/.default`
+   → a token-exchange assertion proving it owns the agent identity.
+3. **Agent identity** performs the on-behalf-of exchange for
+   `api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite`, presenting that
+   assertion as its client credential.
 
-A delegated *user* token is rejected outright by the export route, because its principal is the
-human rather than the agent — so whatever the chain looks like, it has to end at the agent identity.
+The result is a token whose `azp` is the **agent identity** and whose subject is the **human user** —
+which is what makes this path work at all.
 
-> ⚠️ **This agent's use of the S2S shape is under review, and the reason previously given for it was
-> wrong.** The claim was that "a Teams agent has no interactive sign-in and therefore no user
-> assertion to exchange". That is false here: hop 1 of this agent's own WorkIQ chain exchanges the
-> user's Teams SSO token every turn, so a user assertion *is* available and the OBO shape
-> (`AddAgenticTracingExporter`, no `UseS2SEndpoint`) was possible. Microsoft's own guidance picks the
-> auth mode on whether a user is in the loop at runtime — for a Teams agent, that means OBO. Note
-> also that `a365.config.json` records no `--authmode`, so the *registration* used the default
-> delegated grants; only the exporter is S2S. Attribution is not the reason to switch: caller
-> identity travels in baggage and survives the S2S route (see the instrumentation note above).
+> ⚠️ **The export route authorises on `azp`, and this is the trap.** The distro ships
+> `AgenticTokenCache` / `AgenticTokenStruct` for the OBO path, and the skill documentation points at
+> it. It does not work for a Teams agent: it performs a *plain* on-behalf-of exchange through the bot
+> channel app, so the token comes back with `azp` = the bot app and every export fails with
+> **HTTP 403** — silently, because `GetObservabilityToken` swallows the error and the exporter just
+> logs a failed batch.
+>
+> Verified by probing the live endpoint with a single token against three agent ids, identical in
+> every other respect:
+>
+> | agent id in route | result |
+> |---|---|
+> | agent identity `a349a3ca-…` | **403** |
+> | blueprint `f56c2c54-…` | **403** |
+> | bot channel app `0cf93255-…` (the token's `azp`) | **415** — authorised, wrong content type |
+>
+> So the id in the route must equal the token's `azp`. Posting under the bot app id would "work" but
+> would attribute traces to an app that Agent 365 does not know as an agent, splitting this agent's
+> reporting history. The fix is to make the token's `azp` *be* the agent identity — hence the
+> three-hop chain above rather than `AgenticTokenCache`.
+>
+> Note that the blueprint never performs the final exchange itself; agentic apps are barred from
+> client-credentials flows (`AADSTS82001`). It only proves ownership of the agent identity at hop 2.
+
+**Previous implementation.** This agent originally used the S2S shape
+(`UseS2SEndpoint = true`, a background `ObservabilityTokenService` holding a client-credentials
+token). That worked — exports returned 200 — but the token's principal was the agent alone, with no
+user in it, which is the wrong shape for an agent that has a human on every turn. Microsoft's
+guidance picks the auth mode on whether a user is in the loop at runtime, not on where the agent is
+hosted. The S2S version is preserved on the `a365/dotnet-agent-teams` branch.
 
 Per turn, in `Agent/LearnAgent.cs`:
 
@@ -248,13 +269,12 @@ Per turn, in `Agent/LearnAgent.cs`:
   `dotnet-agent-teammate/README.md` for the full write-up and the before/after measurements.
   This is a workaround for an SDK timing quirk, not a supported extension point.
 
-> **The export token does not carry the caller — baggage does.** It is tempting to assume the S2S
-> route loses user attribution because its token belongs to the agent rather than a person. It does
-> not. `AddServiceTracingExporter` and `AddAgenticTracingExporter` differ only in which token cache
-> they use and in `UseS2SEndpoint`; the payload is built identically. Verified on a live turn: the
-> `invoke_agent` span and its `execute_tool` children all carried `user.id` and `user.name`, and
-> `POST /observabilityService/.../traces` returned **200**. Whether the portal *renders* that user
-> for an S2S export is a separate question that only the portal can answer.
+> **Two different things carry the caller, and it is worth keeping them apart.** The *span payload*
+> carries `user.id` and `user.name` through baggage regardless of auth mode — that was verified on
+> the earlier S2S build, where `invoke_agent` and its `execute_tool` children all named the user and
+> `POST /observabilityService/.../traces` returned **200**. What the S2S build could *not* do is make
+> the **export token** represent the user: its principal was the agent alone. The OBO chain used now
+> gives a token that is both — `azp` = the agent identity, subject = the human.
 
 ### How WorkIQ is wired
 

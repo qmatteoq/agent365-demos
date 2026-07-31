@@ -129,7 +129,7 @@ from a terminal, so close that one first to avoid two relays forwarding the same
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `dotnet-agent-teammate` | `python-agent-no-teams` | `python-agent-teams` |
 | --- | --- | --- | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes | Yes, an AI Teammate | Yes | Yes |
-| Observability instrumentation | Yes, exported on-behalf-of | Yes, exported service-to-service | Yes, exported as the agentic user | Yes, exported on-behalf-of | Yes, exported service-to-service |
+| Observability instrumentation | Yes, exported on-behalf-of | Yes, exported on-behalf-of | Yes, exported as the agentic user | Yes, exported on-behalf-of | Yes, exported service-to-service |
 | WorkIQ tools | Yes — mail, calendar, Teams | Yes — mail, calendar, Teams; see the note below | Yes — mail and calendar | No, see the note below | No, see the note below |
 | User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | None — the agent has its own identity | Sign-in through a separate web client app | Teams identity only; no OBO needed |
 
@@ -184,19 +184,23 @@ depends on whether a human is signed in, and on whether the agent has an identit
 | | Chain | Used by |
 | --- | --- | --- |
 | Web-hosted | On-behalf-of: the user's token is the assertion, so the token represents *the agent acting for the user* | `dotnet-agent-no-teams`, `python-agent-no-teams` |
-| Teams-hosted system agent | Service-to-service: blueprint `fmi_path` exchange, then the agent identity authenticates with the resulting assertion | `dotnet-agent-teams`, `python-agent-teams` |
+| Teams-hosted system agent | On-behalf-of, three hops: bot app re-targets the Teams SSO token to the blueprint, blueprint proves ownership via `fmi_path`, agent identity performs the final exchange | `dotnet-agent-teams` |
+| Teams-hosted system agent (S2S) | Service-to-service: blueprint `fmi_path` exchange, then the agent identity authenticates with the resulting assertion — **no user in the token** | `python-agent-teams` |
 | AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
 
-> ⚠️ **The second shape is under review.** The reason previously given here — that a Teams-hosted
-> system agent has no interactive sign-in and therefore no user assertion to exchange — is wrong.
-> Hop 1 of `dotnet-agent-teams`' own WorkIQ chain exchanges the user's Teams SSO token on every
-> turn, so a user assertion *is* available and the on-behalf-of shape was possible. Microsoft's
-> guidance picks the auth mode on whether a user is in the loop at runtime, which for a Teams agent
-> means OBO. Attribution is *not* the deciding factor: the caller travels in baggage, not in the
-> export token, and survives the S2S route — verified on a live turn. See
-> [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
+> ⚠️ **`dotnet-agent-teams` moved from S2S to OBO, and the export route explains why the obvious
+> OBO wiring fails.** The auth mode is decided by whether a human is in the loop at runtime, not by
+> where the agent is hosted — a Teams agent has a user on every turn, so it belongs on OBO. But the
+> distro's `AgenticTokenCache` does a *plain* on-behalf-of exchange through the bot channel app, and
+> the export route authorises on the token's `azp`: it must equal the agent id in the URL. Probed on
+> the live endpoint with one token against three ids — agent identity **403**, blueprint **403**, bot
+> app **415** (authorised, wrong content type). The working chain therefore ends in an exchange
+> performed *by the agent identity for the user*, giving `azp` = agent identity and the human as
+> subject. See [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
+>
+> `python-agent-teams` still uses S2S and has the same issue in principle. Not yet migrated.
 
-In both of the first two cases a plain delegated user token is rejected by the export route, because
+In the web-hosted and S2S cases a plain delegated user token is rejected by the export route, because
 its principal is the human rather than the agent.
 
 The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
@@ -221,15 +225,17 @@ They use two different identities, for two different jobs:
 - **The signed-in user**, through On-Behalf-Of, whenever they read that user's data. WorkIQ tools
   run this way so the agent can only see mail, calendar and Teams content the user could open
   themselves.
-- **The agent's own identity**, for writing observability traces. The observability service binds
-  the caller to the agent named in the export route, and a delegated token's principal is the
-  human rather than the agent, so it answers `403`. The token is therefore minted through the
-  federated identity chain in
-  [`Observability/ObservabilityTokenService.cs`](./dotnet-agent-teams/Observability/ObservabilityTokenService.cs),
-  which produces a token whose subject is the agent.
+- **The agent's own identity**, for writing observability traces. The observability service
+  authorises on the token's `azp`, which must equal the agent id in the export route — a token whose
+  client is the bot channel app answers `403`. The token is therefore minted through the same
+  federated identity chain the WorkIQ tools use
+  ([`Agent365/WorkIqTokenService.cs`](./dotnet-agent-teams/Agent365/WorkIqTokenService.cs)), which
+  ends in an exchange performed by the agent identity *for* the user: `azp` is the agent, the subject
+  is the human.
 
-Traces reach the service over the service-to-service route. Delegated and service-to-service
-traces use different routes and do not accept each other's tokens, so the two have to agree.
+Traces reach the service over the delegated route (`/observability/`). Delegated and
+service-to-service traces use different routes and do not accept each other's tokens, so the token
+and the route have to agree.
 
 The AI Teammate collapses this distinction: both jobs use its own identity.
 

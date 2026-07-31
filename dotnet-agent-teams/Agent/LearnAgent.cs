@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
 using Microsoft.Agents.A365.Observability.Hosting.Extensions;
 using Microsoft.Agents.A365.Observability.Runtime.Common;
@@ -34,6 +35,8 @@ public class LearnAgent : AgentApplication
     private readonly WorkIqToolProvider _workIqTools;
     private readonly LearnMcpTools _learnTools;
     private readonly IConfiguration _configuration;
+    private readonly ObservabilityTokenStore _observabilityTokens;
+    private readonly WorkIqTokenService _workIqTokens;
     private readonly string? _agenticAuthHandlerName;
     private readonly string? _oboAuthHandlerName;
 
@@ -44,6 +47,8 @@ public class LearnAgent : AgentApplication
         WorkIqToolProvider workIqTools,
         LearnMcpTools learnTools,
         IConfiguration configuration,
+        ObservabilityTokenStore observabilityTokens,
+        WorkIqTokenService workIqTokens,
         ILogger<LearnAgent> logger) : base(options)
     {
         _agent = agent;
@@ -52,6 +57,8 @@ public class LearnAgent : AgentApplication
         _workIqTools = workIqTools;
         _learnTools = learnTools;
         _configuration = configuration;
+        _observabilityTokens = observabilityTokens;
+        _workIqTokens = workIqTokens;
 
         // The handler names come from AgentApplication:UserAuthorization:Handlers in appsettings.json.
         _agenticAuthHandlerName = configuration["AgentApplication:AgenticAuthHandlerName"] ?? "agentic";
@@ -140,6 +147,19 @@ public class LearnAgent : AgentApplication
         var (agentId, tenantId) = ResolveObservabilityIdentity(turnContext);
         var hasObservabilityIdentity = !string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(tenantId);
 
+        // The exporter has no token of its own. It flushes on a background loop with no user
+        // context, so the token is minted here - where the turn's user assertion exists - and
+        // deposited in the store for the exporter's TokenResolver to read.
+        //
+        // The chain must end in an exchange performed BY the agent identity FOR the user: the
+        // export route only accepts a token whose azp matches the agent id in the URL, and the
+        // trace still has to name the human. WorkIqTokenService already does exactly that.
+        if (hasObservabilityIdentity)
+        {
+            await PublishObservabilityTokenAsync(turnContext, agentId!, tenantId!, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         // Baggage flows the tenant and agent id onto every child span the AI SDK emits. Without it
         // the exporter cannot group the spans and silently drops them.
         //
@@ -216,6 +236,67 @@ public class LearnAgent : AgentApplication
     /// identity that <c>a365 setup</c> provisioned for it, which is also the id pinned onto the
     /// <see cref="AIAgent"/>, so the parent and child spans agree.
     /// </summary>
+
+    /// <summary>
+    /// Mints the Observability API token for this turn and deposits it for the exporter.
+    /// </summary>
+    /// <remarks>
+    /// Verified against the live service: posting to
+    /// <c>/observability/tenants/{tenant}/otlp/agents/{agentId}/traces</c> is authorised only when
+    /// the token's <c>azp</c> equals <c>{agentId}</c>. The same token was accepted for the bot app
+    /// id and refused (403) for both the agent identity and the blueprint, so the exchange has to
+    /// be performed by the agent identity itself - which is what the three-hop chain does.
+    /// </remarks>
+    private async Task PublishObservabilityTokenAsync(
+        ITurnContext turnContext,
+        string agentId,
+        string tenantId,
+        CancellationToken cancellationToken)
+    {
+        var handlerName = turnContext.Activity.IsAgenticRequest()
+            ? _agenticAuthHandlerName
+            : _oboAuthHandlerName ?? _agenticAuthHandlerName;
+
+        if (string.IsNullOrEmpty(handlerName))
+        {
+            _logger.LogWarning(
+                "No user auth handler this turn; the exporter has no token and traces will not be sent.");
+            return;
+        }
+
+        try
+        {
+            var userAssertion = await UserAuthorization
+                .GetTurnTokenAsync(turnContext, handlerName, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(userAssertion))
+            {
+                _logger.LogWarning("No user token this turn; traces cannot be exported.");
+                return;
+            }
+
+            var token = await _workIqTokens
+                .GetTokenForScopeAsync(
+                    userAssertion,
+                    EnvironmentUtils.GetObservabilityAuthenticationScope()[0],
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(token))
+            {
+                _logger.LogWarning("Could not mint an observability token; traces will not be exported.");
+                return;
+            }
+
+            _observabilityTokens.Set(agentId, tenantId, token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not publish the observability token for this turn.");
+        }
+    }
+
     private (string? AgentId, string? TenantId) ResolveObservabilityIdentity(ITurnContext turnContext)
     {
         var agentId = turnContext.Activity.IsAgenticRequest()

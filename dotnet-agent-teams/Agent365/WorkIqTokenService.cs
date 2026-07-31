@@ -63,8 +63,25 @@ public sealed class WorkIqTokenService(
         string userAssertion,
         string audience,
         CancellationToken cancellationToken = default)
+        => await GetTokenForScopeAsync(userAssertion, $"{audience}/.default", cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>
+    /// Returns a token for an explicit scope, minted through the same three-hop chain, or null when
+    /// the chain cannot produce one.
+    /// </summary>
+    /// <remarks>
+    /// Used for the Observability API, whose scope is a named permission rather than
+    /// <c>/.default</c>. The distinction that matters is not the scope but the client: the token
+    /// comes back with <c>azp</c> = the agent identity and the user as its subject, which is what
+    /// the export route requires. A plain on-behalf-of exchange through the bot app returns
+    /// <c>azp</c> = the bot app and is rejected with HTTP 403.
+    /// </remarks>
+    public async Task<string?> GetTokenForScopeAsync(
+        string userAssertion,
+        string resourceScope,
+        CancellationToken cancellationToken = default)
     {
-        var resourceScope = $"{audience}/.default";
         var cacheKey = $"{resourceScope}|{HashAssertion(userAssertion)}";
 
         if (_cache.TryGetValue(cacheKey, out var cached) && !cached.IsExpiring)
