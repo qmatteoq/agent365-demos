@@ -8,6 +8,8 @@ using Microsoft.Extensions.AI;
 using Microsoft.Identity.Web;
 using Microsoft.Identity.Web.UI;
 using Microsoft.OpenTelemetry;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
 using ModelContextProtocol.Client;
 using OpenAI.Chat;
 
@@ -57,6 +59,13 @@ builder.Services.AddControllersWithViews().AddMicrosoftIdentityUI();
 // A365 observability. The exporter flushes on a background loop with no user context, so the
 // per-user token is deposited in ObservabilityTokenStore by the chat page and read back here.
 // ---------------------------------------------------------------------------
+// Registered before UseMicrosoftOpenTelemetry so this processor sits ahead of the Agent 365 export
+// processor in the pipeline: OnEnd runs in registration order, and the identity has to be on the
+// span before the exporter reads it. Without it the inference span - the prompt, the system
+// instructions and the completion - is dropped. See BaggageBackfillProcessor.
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddProcessor(new BaggageBackfillProcessor()));
+
 builder.UseMicrosoftOpenTelemetry(o =>
 {
     o.Exporters = builder.Environment.IsDevelopment()

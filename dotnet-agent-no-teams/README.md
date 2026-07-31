@@ -153,14 +153,26 @@ request never races the expiry.
 Per turn, in `Home.razor`:
 
 - A **`BaggageBuilder`** scope carries tenant, agent id, agent name, blueprint id, conversation id,
-  session id and `ChannelName("web")`. Spans emitted outside one are dropped by the exporter as
-  *"Partitioned into 0 identity groups"*.
+  session id, the signed-in user (`UserId` / `UserName` / `UserEmail`) and `ChannelName("web")`.
+  Spans emitted outside one are dropped by the exporter as *"Partitioned into 0 identity groups"*.
+  There is no `ITurnContext` here — this is a plain web app, not a Bot Framework turn — so
+  `FromTurnContext` is unavailable and the caller is read straight off the signed-in principal.
+  `ResolveCaller()` is shared with the `InvokeAgentScope` below so the parent span and its children
+  can never disagree about who asked.
 - An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`.
 - There is **no manual `InferenceScope` or `ExecuteToolScope`**. The chat client is wrapped with
   `.UseFunctionInvocation()` and `.UseOpenTelemetry(cfg => cfg.EnableSensitiveData = true)` in
   `Program.cs`, which emits the `gen_ai` inference and tool spans automatically as children of the
   invoke scope. Without that wrapping the agent still answers, but Defender sees a parent span with
   no LLM children.
+- **`BaggageBackfillProcessor` (registered in `Program.cs` before the distro) is what gets the
+  inference span exported at all.** The SDK enriches spans from baggage in `OnStart`, and only when
+  the span already carries `gen_ai.operation.name`. Microsoft.Extensions.AI creates its `chat` span
+  with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags afterwards — verified
+  by decompiling `OpenTelemetryChatClient` — so the enrichment misses it and the exporter drops it
+  with *"1 spans skipped due to missing tenant or agent ID"*. Emitting the span is not the same as
+  exporting it. Registration order is load-bearing; see `dotnet-agent-teammate/README.md` for the
+  full write-up. This is a workaround for an SDK timing quirk, not a supported extension point.
 - A web agent has no `ITurnContext`, so a conversation id is generated per Blazor circuit and
   reused for every turn, giving all spans in the session one `gen_ai.conversation.id`.
 

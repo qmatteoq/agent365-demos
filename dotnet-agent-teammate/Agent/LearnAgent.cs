@@ -3,6 +3,8 @@ using System.Text.RegularExpressions;
 using AgentNotification;
 using Microsoft.Agents.A365.Notifications.Models;
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
+// FromTurnContext lives in Hosting.Extensions, not alongside BaggageBuilder in Runtime.Common.
+using Microsoft.Agents.A365.Observability.Hosting.Extensions;
 using Microsoft.Agents.A365.Observability.Runtime.Common;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
@@ -287,10 +289,28 @@ public class LearnAgent : AgentApplication
             _logger.LogDebug("No Agent 365 identity on this turn; running without observability.");
         }
 
+        // FromTurnContext supplies what identifies the *human* on this turn - user.id and user.name
+        // from Activity.From - plus microsoft.channel.name and the conversation id. Baggage is what
+        // reaches the child inference and execute_tool spans; CallerDetails below only decorates the
+        // parent invoke_agent span, so without this the tool calls are anonymous. BaggageBuilder's
+        // own remarks list tenant, conversation and channel name as certification requirements.
+        //
+        // Order matters. FromTurnContext also writes gen_ai.agent.id from Recipient.AgenticAppId,
+        // so the explicit values are chained afterwards to win - BaggageBuilder keeps one dictionary
+        // and the last Set for a key survives. This agent resolves its own id from the agentic
+        // instance id instead, which stays correct on the email turns too.
+        var baggageConfig = _configuration.GetSection("Agent365Observability");
+
         using IDisposable? baggageScope = hasObservabilityIdentity
             ? new BaggageBuilder()
+                .FromTurnContext(turnContext)
                 .TenantId(resolvedTenantId!)
                 .AgentId(resolvedAgentId!)
+                // Not supplied by FromTurnContext - the activity carries no blueprint or session.
+                .AgentName(baggageConfig["AgentName"] ?? "LearnTeammateAgent")
+                .AgentBlueprintId(baggageConfig["AgentBlueprintId"] ?? string.Empty)
+                .ConversationId(conversationId)
+                .SessionId(conversationId)
                 .Build()
             : null;
 

@@ -230,6 +230,17 @@ Per turn, in `Agent/LearnAgent.cs`:
   `.UseFunctionInvocation()` and `.UseOpenTelemetry()`, which emits the `gen_ai` inference and tool
   spans as children automatically. Without that wrapping the agent answers but Defender shows a
   hollow parent span.
+- **`BaggageBackfillProcessor` (registered in `Program.cs` before the distro) is what gets the
+  inference span exported at all.** The SDK enriches spans from baggage in `OnStart`, and only when
+  the span already carries `gen_ai.operation.name`. Microsoft.Extensions.AI creates its `chat` span
+  with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags afterwards — verified
+  by decompiling `OpenTelemetryChatClient` — so the enrichment misses it and the exporter drops it
+  with *"1 spans skipped due to missing tenant or agent ID"*, taking the prompt and the completion
+  with it. The processor re-runs the copy at `OnEnd`, when the tag exists. Registration order is
+  load-bearing: `OnEnd` runs in registration order, so it must be added **before**
+  `UseMicrosoftOpenTelemetry` to sit ahead of the export processor. See
+  `dotnet-agent-teammate/README.md` for the full write-up and the before/after measurements.
+  This is a workaround for an SDK timing quirk, not a supported extension point.
 
 > **The export token does not carry the caller — baggage does.** It is tempting to assume the S2S
 > route loses user attribution because its token belongs to the agent rather than a person. It does

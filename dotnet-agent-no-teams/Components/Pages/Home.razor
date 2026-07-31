@@ -175,7 +175,10 @@
             invokeScope?.RecordInputMessages([userText]);
 
             // The IChatClient is wrapped with UseOpenTelemetry, so gen_ai inference and tool spans
-            // are emitted automatically as children of this scope — no manual InferenceScope needed.
+            // are emitted automatically as children of this scope. They do not reach Agent 365 on
+            // their own, though - Microsoft.Extensions.AI sets gen_ai.operation.name after starting
+            // the span, so the SDK's OnStart enrichment misses it and the exporter drops it for
+            // missing tenant/agent id. BaggageBackfillProcessor is what rescues them.
             var response = await _agent.RunAsync(userText, _session);
 
             invokeScope?.RecordOutputMessages([response.Text]);
@@ -239,17 +242,44 @@
         return true;
     }
 
-    private IDisposable BuildBaggageScope() =>
-        new BaggageBuilder()
+    private IDisposable BuildBaggageScope()
+    {
+        // Baggage is what reaches the child inference and tool spans. CallerDetails on the
+        // InvokeAgentScope below only decorates the parent span, so without these three the
+        // tool calls arrive anonymous. There is no TurnContext here - this is a plain web app,
+        // not a Bot Framework turn - so FromTurnContext is unavailable and the user is read
+        // straight off the signed-in principal.
+        var (userId, userName, userEmail) = ResolveCaller();
+
+        return new BaggageBuilder()
             .TenantId(A365.TenantId)
             .AgentId(A365.AgentIdentityClientId)
             .AgentName(A365.AgentName)
             .AgentBlueprintId(A365.BlueprintClientId)
             .ConversationId(_conversationId)
             .SessionId(_conversationId)
+            .UserId(userId)
+            .UserName(userName)
+            .UserEmail(userEmail)
             // Not a Teams-hosted agent — use a logical channel name for the web UI.
             .ChannelName("web")
             .Build();
+    }
+
+    /// <summary>
+    /// Reads the caller off the signed-in principal. Shared by the baggage scope and the
+    /// InvokeAgentScope so the parent span and its children can never disagree about who asked.
+    /// </summary>
+    private (string UserId, string UserName, string UserEmail) ResolveCaller() =>
+    (
+        _user?.FindFirst("oid")?.Value
+            ?? _user?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? "unknown",
+        _user?.Identity?.Name ?? "unknown",
+        _user?.FindFirst("preferred_username")?.Value
+            ?? _user?.FindFirst(ClaimTypes.Email)?.Value
+            ?? string.Empty
+    );
 
     private InvokeAgentScope StartInvokeScope(string userText)
     {
@@ -260,15 +290,13 @@
             agentBlueprintId: A365.BlueprintClientId,
             tenantId: A365.TenantId);
 
+        var (userId, userName, userEmail) = ResolveCaller();
+
         var callerDetails = new CallerDetails(
             userDetails: new UserDetails(
-                userId: _user?.FindFirst("oid")?.Value
-                    ?? _user?.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                    ?? "unknown",
-                userName: _user?.Identity?.Name ?? "unknown",
-                userEmail: _user?.FindFirst("preferred_username")?.Value
-                    ?? _user?.FindFirst(ClaimTypes.Email)?.Value
-                    ?? string.Empty));
+                userId: userId,
+                userName: userName,
+                userEmail: userEmail));
 
         // Blueprint id is a GUID and therefore always URI-safe; the display name is not.
         var endpoint = new Uri($"https://{A365.BlueprintClientId}.agent.invalid/");
