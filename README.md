@@ -1,443 +1,264 @@
 # agent365-demos
 
-A collection of demo agents used to showcase **Agent 365** onboarding.
+Five demo agents showing how to onboard an existing agent to **Microsoft Agent 365** and instrument
+it for **observability** and **Work IQ** tool access.
 
-Every agent shares the same functional goal: it is a research assistant for the Microsoft ecosystem,
-grounding its answers in the official
+Every agent does the same job — it is a research assistant for the Microsoft ecosystem, grounding its
+answers in the official
 [Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp)
-(`https://learn.microsoft.com/api/mcp`, streamable HTTP). What changes between them is the
-technology used to build the agent.
+(`https://learn.microsoft.com/api/mcp`, streamable HTTP). The agent logic is deliberately
+uninteresting and near-identical across all five. What changes is the **stack**, the **hosting
+surface**, and — the point of the repo — the **Agent 365 shape** that follows from them.
+
+Between them they cover the three token paths an agent can use to export telemetry to Agent 365, in
+both .NET and Python.
 
 ## Agents
 
-| Folder | Stack | Hosting |
-| --- | --- | --- |
-| [`dotnet-agent-no-teams`](./dotnet-agent-no-teams) | Microsoft Agent Framework (.NET) + Azure OpenAI | Blazor Server web app, no Teams |
-| [`dotnet-agent-teams`](./dotnet-agent-teams) | Microsoft 365 Agents SDK (.NET) + Agent Framework + Azure OpenAI | Custom engine agent in Microsoft Teams / M365 Copilot |
-| [`dotnet-agent-teammate`](./dotnet-agent-teammate) | Microsoft 365 Agents SDK (.NET) + Agent Framework + Azure OpenAI | **AI Teammate** in Microsoft Teams / M365 Copilot |
-| [`python-agent-no-teams`](./python-agent-no-teams) | LangChain (Python) + Azure OpenAI | FastAPI web app, no Teams |
-| [`python-agent-teams`](./python-agent-teams) | Microsoft 365 Agents SDK (Python) + LangChain + Azure OpenAI | Custom engine agent in Microsoft Teams / M365 Copilot |
+| Folder | Stack | Hosting | Agent 365 shape |
+| --- | --- | --- | --- |
+| [`dotnet-agent-no-teams`](./dotnet-agent-no-teams) | Agent Framework (.NET) + Azure OpenAI | Blazor Server web app | System agent, on-behalf-of |
+| [`dotnet-agent-teams`](./dotnet-agent-teams) | M365 Agents SDK (.NET) + Agent Framework | Teams / M365 Copilot | Custom engine agent, on-behalf-of |
+| [`dotnet-agent-teammate`](./dotnet-agent-teammate) | M365 Agents SDK (.NET) + Agent Framework | Teams / M365 Copilot | **AI Teammate**, agentic user |
+| [`python-agent-no-teams`](./python-agent-no-teams) | LangChain (Python) + Azure OpenAI | FastAPI web app | System agent, on-behalf-of |
+| [`python-agent-teams`](./python-agent-teams) | M365 Agents SDK (Python) + LangChain | Teams / M365 Copilot | Custom engine agent, on-behalf-of |
 
-`dotnet-agent-teams` and `dotnet-agent-teammate` are deliberately the *same* agent, onboarded two
-different ways: the first as a system agent acting **on behalf of the signed-in user**, the second
-as an AI Teammate acting under **its own Agentic User identity**. Comparing them is the point of
-having both.
+`dotnet-agent-teams` and `dotnet-agent-teammate` are the *same* agent onboarded two different ways —
+one acting on behalf of the signed-in user, one acting under its own Agentic User identity.
+Comparing them is the clearest way to see what the AI Teammate shape actually changes.
 
-## Branching model
+## What you need before running any of this
 
-- **`main`** — the Agent 365 *instrumented* version of each agent (identity, blueprint, observability).
-- **`plain/<name>`** — a snapshot of the same agent *before* Agent 365 onboarding.
-- **`a365/<name>`** — the same agent immediately *after* onboarding, before later refinements.
+None of the Agent 365 identifiers in this repo will work in your tenant. Blueprints, agent
+identities, bot registrations and Teams app ids are all tenant-scoped, so **you must register your
+own** before an agent will start. Configuration files carry placeholders; each agent's README lists
+exactly which values it needs and where they go.
 
-| Branch | Contents |
-| --- | --- |
-| `plain/dotnet-agent-no-teams` | `dotnet-agent-no-teams`, before onboarding |
-| `a365/dotnet-agent-no-teams` | `dotnet-agent-no-teams`, after onboarding (merged into `main`) |
-| `plain/teams-agent` | `dotnet-agent-teams`, before onboarding |
-| `a365/teams-agent` | `dotnet-agent-teams`, after onboarding (merged into `main`) |
-| `plain/python-agent-no-teams` | `python-agent-no-teams`, before onboarding |
-| `a365/python-agent-no-teams` | `python-agent-no-teams`, after onboarding (merged into `main`) |
-| `plain/python-agent-teams` | `python-agent-teams`, before onboarding |
-| `a365/python-agent-teams` | `python-agent-teams`, after onboarding (merged into `main`) |
-| `plain/dotnet-agent-teammate` | `dotnet-agent-teammate`, before onboarding |
-| `a365/dotnet-agent-teammate` | `dotnet-agent-teammate`, after onboarding (merged into `main`) |
-| `s2s/teams-agents` | Both Teams agents while they still exported **service-to-service** (a background loop holding a client-credentials token), kept as a reference for that shape. See [below](#three-ways-to-authenticate-the-observability-exporter) for why they moved to on-behalf-of. |
-| `obo/fmi-agent-identity` | Both Teams agents on the **hand-rolled three-hop FMI chain** — delegated, but forcing the token's `azp` to the A365 agent identity so the export route could carry it. Worked, but is not the documented path. Kept because it is the only build in the repo that exports a *custom engine* agent under its agent identity. |
-
-> The two Teams agents' `plain/` and `a365/` branches are named `plain/teams-agent` and
-> `a365/teams-agent` for the .NET one — a leftover from before the folder was renamed.
-
-This makes the onboarding work visible as a diff:
+The registration itself is done with the Agent 365 CLI:
 
 ```powershell
-git diff plain/dotnet-agent-no-teams..main -- dotnet-agent-no-teams
-git diff plain/teams-agent..main -- dotnet-agent-teams
-git diff plain/dotnet-agent-teammate..main -- dotnet-agent-teammate
-git diff plain/python-agent-no-teams..main -- python-agent-no-teams
+dotnet tool install -g Microsoft.Agents.A365.DevTools.Cli
+a365 --version
 ```
 
-Switch to a `plain/*` branch to demo the "before" state, switch back to `main` for the "after".
-
-## Running an agent
-
-Open **the agent's own folder** in VS Code, not the repository root, and press <kbd>F5</kbd>. Four of
-the five agents carry their own `.vscode/launch.json` and `.vscode/tasks.json`, which build them,
-start whatever they depend on, and attach the debugger. `dotnet-agent-teammate` is the exception —
-it has no `.vscode` folder and is started from a terminal.
-
-| Agent | What F5 does | Reachable at |
-| --- | --- | --- |
-| `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
-| `dotnet-agent-teams` | Builds, brings the dev tunnel up, then starts the agent on port 3978 | Teams, once the agent is listening |
-| `dotnet-agent-teammate` | No F5 — run `dotnet run` and `devtunnel host dotnet-teammate-tunnel` in two terminals (port 3980) | Teams, once the agent is listening |
-| `python-agent-no-teams` | Syncs dependencies, starts the app, then opens the browser | <http://localhost:8000> |
-| `python-agent-teams` | Syncs dependencies, brings the dev tunnel up, then starts the agent on port 3979 | Teams, once the agent is listening |
-
-The three Teams-hosted agents use three different ports — 3978, 3979 and 3980 — so they can all run
-at the same time.
-
-`dotnet-agent-no-teams` and `dotnet-agent-teams` run with `ASPNETCORE_ENVIRONMENT=Development`,
-which is what makes **user secrets** load. Neither can authenticate without them, so if a fresh
-clone fails at startup, check that they are set:
+Then, from the agent's own folder:
 
 ```powershell
-dotnet user-secrets list
+# system agent / custom engine agent
+a365 setup all --authmode obo
+
+# AI Teammate
+a365 setup all --aiteammate --m365
 ```
 
-`dotnet-agent-teammate` runs as **`Production`** instead, because the A365 Tooling SDK selects its
-agentic token provider on the environment name and falls back to a dev provider in Development.
-`WebApplication.CreateBuilder` only registers user secrets in Development, so that agent calls
-`AddUserSecrets` explicitly — see its own README for why removing that call makes the agent go
-silent rather than throw.
+This creates the agent identity blueprint, the Entra registrations, and — if a
+`ToolingManifest.json` is present — grants the Work IQ permissions. See each agent's README for the
+values it writes and the ones you must supply yourself.
 
-No agent has an `appsettings.Development.json` or `.env` switch disabling the Agent 365 exporter, so
-a local run exports traces to Agent 365 exactly like a production run. That is deliberate: it is the
-point of the demo. Where a console exporter exists, it is added *alongside* the Agent 365 one, never
-instead of it.
-
-The Python agents read their configuration from `.env`; see
-[`python-agent-no-teams/README.md`](./python-agent-no-teams/README.md).
-
-### The Teams agents' dev tunnels
-
-Teams cannot reach `localhost`, so each Teams-hosted agent is exposed through a **named** dev
-tunnel. Named rather than anonymous matters: a named tunnel keeps the same public url every time,
-and that url is registered as the agent's messaging endpoint. An anonymous tunnel would issue a new
-url per run and silently break the channel.
-
-Tunnel urls are **not** derived from the tunnel name and are only printed while hosting — read them,
-do not guess them.
-
-| Agent | Tunnel | Port |
-| --- | --- | --- |
-| `dotnet-agent-teams` | `dotnet-agent-teams-tunnel` | 3978 |
-| `python-agent-teams` | `python-agent-teams-tunnel` | 3979 |
-| `dotnet-agent-teammate` | `dotnet-teammate-tunnel` | 3980 |
-
-The tunnels already exist in this environment. On a new machine, create one like this:
-
-```powershell
-devtunnel create dotnet-agent-teams-tunnel --allow-anonymous
-devtunnel port create dotnet-agent-teams-tunnel --port-number 3978
-devtunnel show dotnet-agent-teams-tunnel
-```
-
-`devtunnel show` prints the public url. If it differs from the one registered for the agent, update
-the messaging endpoint to `<url>/api/messages` — on the Azure Bot for `dotnet-agent-teams` and
-`python-agent-teams`, or with `a365 setup blueprint --update-endpoint <url> --m365` for
-`dotnet-agent-teammate`, which has no Azure Bot.
-
-Host a tunnel yourself with `devtunnel host <name>` if you want it up without running the agent. VS
-Code will not start a second copy of its own tunnel task, but it cannot see a tunnel you started
-from a terminal, so close that one first to avoid two relays forwarding the same port.
+> `a365 setup all` rewrites configuration files it owns. On the two agents that also have an Azure
+> Bot registration (`dotnet-agent-teams`, `python-agent-teams`) it overwrites the **bot channel
+> credentials** with the blueprint's, which will break channel authentication on the next restart.
+> Restore the bot app's own client id and secret afterwards, and keep the two identities separate —
+> Entra bars an agentic application from requesting client-credentials tokens (`AADSTS82001`), so a
+> blueprint can never sign Bot Framework replies.
 
 ## Agent 365 capabilities per agent
 
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `dotnet-agent-teammate` | `python-agent-no-teams` | `python-agent-teams` |
 | --- | --- | --- | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes | Yes, an AI Teammate | Yes | Yes |
-| Observability instrumentation | Yes, exported on-behalf-of | Yes, exported on-behalf-of | Yes, exported as the agentic user | Yes, exported on-behalf-of | Yes, exported on-behalf-of |
-| WorkIQ tools | Yes — mail, calendar, Teams | Yes — mail, calendar, Teams; see the note below | Yes — mail and calendar | No, see the note below | No, see the note below |
-| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | None — the agent has its own identity | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO |
+| Observability | On-behalf-of | On-behalf-of | Agentic user | On-behalf-of | On-behalf-of |
+| Work IQ tools | Mail, calendar, Teams | Mail, calendar, Teams | Mail, calendar | No — see below | No — see below |
+| User authentication | Separate web sign-in app | Teams SSO | None — own identity | Separate web sign-in app | Teams SSO |
 
-### Why the Python agents have no WorkIQ tools
+## Observability
 
-WorkIQ is wired into an agent through a framework-specific adapter package, and Microsoft does not
-publish one for Python and LangChain. Every other combination has one -
-`microsoft-agents-a365-tooling-extensions-agentframework`, `-openai`, `-googleadk`,
-`-semantickernel` and `-azureaifoundry` all exist on PyPI, and Node.js has a LangChain adapter, but
-`microsoft-agents-a365-tooling-extensions-langchain` does not exist. This applies to both Python
-agents in this repo, whatever their hosting.
+### The one rule that decides everything
 
-Nothing about WorkIQ itself blocks these agents. Its servers are ordinary streamable HTTP MCP servers,
-which is the transport the agents already use for Microsoft Learn, and the framework-agnostic
-`microsoft-agents-a365-tooling` package exposes their URLs and scopes. What is missing is the glue,
-including the per-server token: the SDK acquires it through an M365 Agents SDK `TurnContext`, which a
-plain web app does not have. `python-agent-no-teams` already works around the same gap for
-observability with its own on-behalf-of chain, so the adapter is writable - it is simply unsupported
-code, so these demos leave it out.
+The exporter posts spans to:
+
+```text
+POST /observability/tenants/{tenantId}/otlp/agents/{agentId}/traces
+```
+
+The service authorises by comparing the **`azp` claim of the token** against the **`{agentId}` in the
+URL**. They must be identical. If they differ you get `403`; the exporter logs a failed batch and
+carries on, so the agent looks healthy while emitting nothing.
+
+Everything below is just three different ways of satisfying that one rule.
+
+### Three token paths
+
+| Hosting shape | How the token is acquired | `azp` / export id | Used by |
+| --- | --- | --- | --- |
+| Web app | Two-hop federated chain: the blueprint proves it owns the agent identity via `fmi_path`, then the agent identity performs an on-behalf-of exchange using the signed-in user's token | the **agent identity** | `dotnet-agent-no-teams`, `python-agent-no-teams` |
+| Teams custom engine agent | One call. An Azure Bot OAuth connection is scoped to the observability API and the Bot Framework Token Service performs the exchange | the **bot app** registration | `dotnet-agent-teams`, `python-agent-teams` |
+| AI Teammate | The SDK's built-in `AgenticTokenCache` exchanges the turn token for one belonging to the agent's own Agentic User | the **agentic instance** | `dotnet-agent-teammate` |
+
+All three post to the delegated route (`/observability/`). The service-to-service route
+(`/observabilityService/`) is for app-only tokens and the two do not accept each other's tokens, so
+leave `UseS2SEndpoint` / `use_s2s_endpoint` at its default of `false` on every agent here.
+
+### How this maps onto Microsoft's documented scenarios
+
+The
+[observability authentication guide](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup)
+defines four scenarios, selected on two questions: does the turn carry **agentic identity**
+(`agenticAppId` / `agenticUserId`), and is the token delegated or app-only?
+
+| Agent | Documented scenario |
+| --- | --- |
+| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** |
+| `dotnet-agent-teams`, `python-agent-teams` | **Custom engine using OBO** |
+| `dotnet-agent-no-teams`, `python-agent-no-teams` | none of the four — see below |
+
+> **"Agent 365-enabled" does not mean "registered with Agent 365".** Every agent here is registered
+> and holds a blueprint. The term describes how the turn *arrives*: an Agent 365-enabled agent is
+> invoked as the agentic app and its activity carries `agenticAppId`. A Teams custom engine agent is
+> invoked through its own bot registration and carries none, which is why it authenticates as the bot
+> app instead.
+>
+> That is by design rather than a limitation. The
+> [get-started guide](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
+> states that registration may be based on *"your existing Microsoft Entra application registration
+> **or** a blueprint"*, and that *"Microsoft 365 custom engine agents are already discoverable today
+> using their existing Microsoft Entra application registration."* For that agent type the app
+> registration **is** the identity the platform knows it by. Traces exported under it are attributed
+> in Microsoft Admin Center to the registered agent identity, not to the bot app.
+>
+> Moving an agent onto the agentic path is an **agent type** change, not an instrumentation change —
+> the same page notes that *"AI teammate for Microsoft 365 custom engine agents requires an agent
+> identity blueprint"*. `dotnet-agent-teammate` is that upgrade applied to `dotnet-agent-teams`.
+
+The two **web apps** fall outside the taxonomy: all four documented scenarios assume an Agents SDK /
+Bot Framework agent, and the closest one requires an Azure Bot OAuth connection, which a plain web
+app does not have. They satisfy the `azp` rule from the other side, with the agent identity as both
+the token's client and the export id.
+
+### The observability API scope
+
+One identifier in this repo is **not** tenant-specific and should be used as-is: the Agent 365
+Observability API, `9b975845-388f-4429-889e-eab1ef63949c`. It is a Microsoft first-party resource
+with the same id in every tenant.
+
+| Path | Scope to request |
+| --- | --- |
+| Azure Bot OAuth connection | `api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite` |
+| Web app federated chain | `api://9b975845-388f-4429-889e-eab1ef63949c/.default` |
+
+An OAuth connection left on the default `api://botid-<client-id>/defaultScopes` produces
+`401 InvalidAudience`.
 
 ### Emitting a span is not the same as exporting it
 
 All three .NET agents register a small `BaggageBackfillProcessor` before
-`UseMicrosoftOpenTelemetry`, and without it the **model call never reaches Agent 365**.
+`UseMicrosoftOpenTelemetry`. Without it the **model call never reaches Agent 365**, and the loss is
+silent apart from one line:
 
-The SDK copies identity from baggage onto spans in `OnStart`, and only for spans that already carry
-a `gen_ai.operation.name` tag. The scopes the A365 SDK creates itself set that tag as they start, so
-`invoke_agent` and `execute_tool` are fine. Microsoft.Extensions.AI does not: it creates its `chat`
-span with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags afterwards
-(verified by decompiling `OpenTelemetryChatClient`). The enrichment therefore misses it and the
-exporter drops it:
-
-```
+```text
 [Agent365Exporter] 1 spans skipped due to missing tenant or agent ID
 ```
 
-The prompt, the system instructions and the completion go with it — Defender records that a turn
-happened and which tools ran, but not what the model was asked or what it answered. The console
-exporter still shows the span, which is what makes this easy to miss.
+The distro copies identity from baggage onto spans in `OnStart`, and only for spans that already
+carry a `gen_ai.operation.name` tag. Scopes the A365 SDK creates itself set that tag as they start,
+so `invoke_agent` and `execute_tool` are enriched correctly. `Microsoft.Extensions.AI` does not: it
+creates its `chat` span with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags
+afterwards, so the enrichment misses it and the exporter drops it — taking the prompt, the system
+instructions and the completion with it. The console exporter still prints the span, which is what
+makes the loss easy to miss.
 
 The processor re-runs the same copy at `OnEnd`, when the tag exists. On one measured turn the export
-went from *1 span / 2,247 bytes* to *2 spans / 99,255 bytes*.
+went from 1 span / 2,247 bytes to 2 spans / 99,255 bytes.
 
 > This is a workaround for an SDK timing quirk, not a supported extension point — the distro exposes
-> no processor hook. Whether the Python SDK has the same gap has **not** been checked.
+> no processor hook. Whether the Python distro has the same gap has not been checked.
 
-### Three ways to authenticate the observability exporter
+### Keeping identity consistent across a turn
 
-The exporter's token must have the *agent identity* as its principal, but how the agent gets there
-depends on whether a human is signed in, and on whether the agent has an identity of its own:
+Auto-instrumented spans (LangChain, the LLM client) read `gen_ai.agent.id` from **baggage**, while
+the SDK's own scopes take it from the invoke scope. If those two disagree, a single turn splits into
+two identity groups and only one of them authenticates. Build both from the same value.
 
-| | Chain | Used by |
-| --- | --- | --- |
-| Web-hosted | On-behalf-of: the user's token is the assertion, so the token represents *the agent acting for the user* | `dotnet-agent-no-teams`, `python-agent-no-teams` |
-| Teams-hosted system agent (*custom engine*) | On-behalf-of, one call: the Azure Bot OAuth connection is scoped to the observability API, and the Bot Framework Token Service performs the exchange | `dotnet-agent-teams`, `python-agent-teams` |
-| AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
+## Work IQ
 
-### How these map onto Microsoft's four documented scenarios
+Tools are resolved **per turn**, not at startup, because the token only exists inside a turn.
 
-The
-[observability authentication docs](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup)
-define four scenarios, selected on two questions: does the turn carry **agentic identity**
-(`agenticAppId` / `agenticUserId`) from the Agent 365 platform, and is the token **delegated** or
-**app-only**?
-
-| Agent | Documented scenario | Export id | Reported in MAC as |
-|---|---|---|---|
-| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache` (the doc says "no custom resolver needed"; in .NET this still needs a thin one, see below) | agentic instance id from the activity | its agentic user |
-| `dotnet-agent-teams` | **Custom engine using OBO** — Azure Bot OAuth connection scoped to the observability API | bot app client id | **the agent identity** (service resolves it) |
-| `python-agent-teams` | **Custom engine using OBO** | bot app client id | **the agent identity** (service resolves it) |
-| `dotnet-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity | not yet observed |
-| `python-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity | not yet observed |
-
-> The two **web-hosted** agents fall outside the taxonomy, and this is worth being explicit about
-> rather than pretending otherwise. All four documented scenarios assume an Agents SDK / Bot
-> Framework agent: *Custom engine using OBO* requires an **Azure Bot OAuth connection**, and these
-> two agents are plain web apps with no Azure Bot at all. So they cannot use it, and there is no
-> published scenario that covers them.
->
-> What they do instead is a two-hop federated identity chain that makes the token's `azp` the
-> **A365 agent identity**, and they export under that same id. That satisfies the one invariant the
-> docs are actually enforcing — *the id in the export route must equal the token's `azp`, or you get
-> HTTP 403* — just with a different client. `python-agent-no-teams` is confirmed exporting; the
-> `dotnet-agent-no-teams` export has **not** been observed succeeding end to end (see its README).
->
-> Both use the resource's `/.default` scope rather than the named `Agent365.Observability.OtelWrite`
-> the Teams agents use. On a delegated grant `/.default` resolves to whatever has been consented for
-> that resource, which here is that one scope — so the resulting token carries the same claim.
-
-> **One documentation defect worth knowing before you copy scenario 1.** It says the built-in
-> `AgenticTokenCache` means "no custom `TokenResolver` needed". In `Microsoft.OpenTelemetry` 1.0.7
-> for .NET that is not true: `UseMicrosoftOpenTelemetry` does **not** register
-> `IExporterTokenCache<AgenticTokenStruct>` itself, and without registering it manually **the host
-> fails to start**. `dotnet-agent-teammate` therefore creates the cache up front and wires a thin
-> resolver that reads from it. It is still scenario 1 — the built-in cache does the token work — but
-> the wiring is not as free as the page implies.
-
-> ⚠️ **The two Teams-hosted system agents are *custom engine agents*, and that classification is
-> the whole story.** Microsoft's guidance selects the scenario on one testable criterion: whether
-> the incoming turn carries **agentic identity** (`agenticAppId` / `agenticUserId`) from the
-> Agent 365 platform. These two are reached through their **own bot app registration** via Teams, so
-> they carry none — directly observed, not inferred (`agentic_app_id=None agentic_user_id=None`).
-> That makes them
-> [custom engine agents using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo),
-> and the docs are explicit: *the `agentId` in the token cache must match the app registration's
-> Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
->
-> **"Agent 365-enabled" does not mean "registered with Agent 365", and that is the single most
-> confusing thing on this page.** All five agents here are registered, hold blueprints, and appear
-> in the admin center. The doc's term refers to how the turn *arrives*. Registration and agent type
-> are separate axes:
->
-> | | agents 2 & 4 | agent 5 |
-> |---|---|---|
-> | Registered in A365 / governed | yes | yes |
-> | Agent type | M365 **custom engine agent** | **AI teammate** |
-> | Invoked as | its own Entra app (the bot) | the agentic app |
-> | Turn carries `agenticAppId` | no | yes |
-> | Recommended scenario | Custom engine + OBO | Agent 365-enabled + OBO |
->
-> [Get started with Agent 365 development](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
-> confirms the design: *"Register your agent using your existing Microsoft Entra application
-> registration **or** a blueprint"*, and *"Microsoft 365 custom engine agents are already
-> discoverable today using their existing Microsoft Entra application registration."* For a custom
-> engine agent the **Entra app registration is the identity the platform knows it by** — so
-> exporting under it is the registration identity, not a workaround. The same page names the upgrade
-> that changes this: *"AI teammate for Microsoft 365 custom engine agents requires an agent identity
-> blueprint"* — which is what `dotnet-agent-teammate` is. Running under its own identity is an agent
-> *type* change, not an instrumentation change.
->
-> The export route authorises on the token's `azp`, which must equal the agent id in the URL.
-> Probed on the live endpoint with one token against three ids — agent identity **403**, blueprint
-> **403**, bot app **415** (authorised, wrong content type). On this path the Token Service issues
-> the token to the bot app, so the route carries the bot app's client id and the two agree.
->
-> ✅ **Confirmed end to end in MAC.** Exporting under the bot app id does *not* orphan the traces.
-> The portal groups and labels them under **`dotnet-agent-teams Identity`** — the Agent 365 agent
-> identity's display name — with `TargetAgentId` = the bot app id and `TargetAgentBlueprintId` =
-> the blueprint. Note the label is the *identity's* name, not the bot app's (which is
-> "dotnet-agent-teams **Bot**"), so the service is resolving past the transport id to the registered
-> agent rather than echoing it. The id in the export route is a *routing* key, not the identity the
-> agent is reported as. This was the one thing HTTP 200 could not tell us, and it settles the
-> question in favour of the documented path.
->
-> *Inferred, not verified:* the resolution most likely runs through `TargetAgentBlueprintId` — the
-> blueprint owns the agent identity, and the blueprint id reaches the service only because
-> `.AgentBlueprintId()` puts it in baggage. If so, that call is load-bearing rather than cosmetic.
-> To test, drop it from baggage for one turn and see whether the trace loses its agent name.
->
-> Two traps on the way in, both of which cost this repo a rebuild:
-> - The distro's **`AgenticTokenCache`** looks like the OBO answer and the `instrument-observability`
->   skill points at it. It does a plain on-behalf-of exchange through the bot app, so pairing it with
->   an agent-identity route yields **403** — silently, because the error is swallowed.
-> - An OAuth connection left on the default `api://botid-…/defaultScopes` yields
->   **401 InvalidAudience**. It must be scoped to `Agent365.Observability.OtelWrite`.
-
-<details>
-<summary>These agents previously used a hand-rolled three-hop FMI chain. Why, and why that was wrong.</summary>
-
-Before the documented path was found, both agents forced the token's `azp` to be the Agent 365
-**agent identity** with a three-hop chain: bot app re-targets the Teams SSO token to the blueprint,
-blueprint proves ownership via `fmi_path`, agent identity performs the final exchange. It worked —
-exports returned 200 — but it needed the blueprint's client secret at runtime and it is not what
-Microsoft documents for this scenario.
-
-It was written by following the Agent 365 skills rather than the documentation, and the two
-diverge:
-
-- `instrument-observability` has **no custom-engine branch at all**. Grepping its three reference
-  docs for `azureBotOAuthConnectionName`, `oboConnectionProfile`, or an OAuth-connection scope of
-  `Agent365.Observability.OtelWrite` returns **zero hits** — the docs' central Azure prerequisite
-  appears nowhere in the skill.
-- It collapses OBO into the agentic path: *"OBO path (`obo` / `agentic-user`) — applies to both AI
-  Teammate agents and Standard .NET agents"*, one branch for two identity models. Its Python sample
-  reads `agent_id = context.activity.recipient.agentic_app_id` and instructs *"resolve dynamically
-  from context each turn (never from config)"* — the exact opposite of the documented rule for a
-  custom engine agent, and `agentic_app_id` is `None` on these turns anyway.
-- `a365-code-validator` treats *"token principal is the app, not the agent identity"* as the cause
-  of a 403 and prescribes the FMI chain. That rule is **specific to S2S**; applied to OBO it sends
-  you down the three-hop route.
-
-The diagnosis of the 403 was right and matches the docs verbatim; the FMI *workaround* was the
-mistake. The chain is preserved on the **`obo/fmi-agent-identity`** branch — *not* `s2s/teams-agents`,
-which holds the earlier client-credentials build and is a different shape entirely. It is **not** the
-right answer for genuinely Agent 365-enabled agents either: those use the distro's built-in
-`AgenticTokenCache`, as `dotnet-agent-teammate` does. Its one remaining virtue is that it is the only
-build here that exports a custom engine agent under its agent identity, which is what made the MAC
-comparison possible. `dotnet-agent-teams` still uses the chain for **WorkIQ**, which does need it.
-
-</details>
-
-In the web-hosted case a plain delegated user token is rejected by the export route, because its
-principal is the human rather than the agent.
-
-The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
-behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from
-requesting app-only tokens at all (**`AADSTS82001`**). Its tokens come from
-`UserAuthorization.ExchangeTurnTokenAsync(turnContext, "agentic", …)`, which runs a three-hop chain
-ending in a `grant_type=user_fic` exchange. That last hop is *delegated*, for the Agentic User
-rather than for a human. See
-[`dotnet-agent-teammate/README.md`](./dotnet-agent-teammate/README.md) for the full chain.
-
-> ⚠️ On the two Teams-hosted **system** agents, `a365 setup all` overwrites the bot channel
-> credentials with the blueprint's and must be undone afterwards. Entra bars agentic applications
-> from client-credentials tokens (AADSTS82001), so a blueprint cannot sign Bot Framework replies,
-> and it is also the wrong audience for validating the inbound Teams token. Each agent's README
-> documents the repair. `dotnet-agent-teammate` is immune: it has no Azure Bot and no bot channel
-> app, because the messaging endpoint is registered on the blueprint itself.
-
-### How the Teams-hosted system agents authenticate
-
-They use two different identities, for two different jobs:
-
-- **The signed-in user**, through On-Behalf-Of, whenever they read that user's data. WorkIQ tools
-  run this way so the agent can only see mail, calendar and Teams content the user could open
-  themselves.
-- **The bot app**, for writing observability traces. The observability service authorises on the
-  token's `azp`, which must equal the agent id in the export route. On this path the Bot Framework
-  Token Service issues the token to the bot app, so the route carries the bot app's client id. The
-  token is still delegated — the human is its subject — but its client is the app.
-
-Each agent therefore needs an Azure Bot OAuth connection scoped to
-`api://9b975845-…/Agent365.Observability.OtelWrite`, and one `GetTurnTokenAsync` /
-`auth.get_token` call per turn. `dotnet-agent-teams` adds this as a **second** connection
-(`oboConnectionProfile`) rather than re-scoping its existing one, because WorkIQ uses the original
-connection's `api://botid-…` token as its OBO *assertion* — and an assertion must have the
-exchanging client as its audience.
-
-Traces reach the service over the delegated route (`/observability/`). Delegated and
-service-to-service traces use different routes and do not accept each other's tokens, so the token
-and the route have to agree.
-
-The AI Teammate collapses this distinction: both jobs use its own identity.
-
-### Working around a broken tool discovery route
-
-Both agents load their WorkIQ tools without asking the tooling gateway which servers they may use.
-That discovery call fails service side:
-
-```text
-GET https://agent365.svc.cloud.microsoft/agents/v2/{agentId}/mcpServers  ->  500
-```
-
-The same route returns 500 for an agent id that does not exist, where a 404 would be expected, and
-other `/agents/v2/` routes are healthy, which points at the route itself rather than at either
-agent. Every published version of `Microsoft.Agents.A365.Tooling` hardcodes that path, so there is
-no version to pin to and no setting to change.
-
-Discovery turns out to be unnecessary. `ToolingManifest.json`, written by
-`a365 develop add-mcp-servers`, already lists the url, audience and scope of every server, and the
-servers themselves are healthy. All three WorkIQ-enabled agents therefore read that manifest and
-connect to each server directly:
-
-- [`dotnet-agent-no-teams/Agent365/WorkIqToolProvider.cs`](./dotnet-agent-no-teams/Agent365/WorkIqToolProvider.cs)
-- [`dotnet-agent-teams/Agent365/WorkIqToolProvider.cs`](./dotnet-agent-teams/Agent365/WorkIqToolProvider.cs)
-- [`dotnet-agent-teammate/Agent365/WorkIqToolProvider.cs`](./dotnet-agent-teammate/Agent365/WorkIqToolProvider.cs)
-
-Each server is contacted independently and a failure is logged and skipped, so a server that is
-down costs only its own tools. Once the gateway is fixed, these providers can be replaced by
-`IMcpToolRegistrationService.GetMcpToolsAsync` again with no other change.
-
-On `dotnet-agent-teammate` there is a second, independent reason the SDK path cannot be used at
-all: every version of `Microsoft.Agents.A365.Tooling` pins `ModelContextProtocol.Core 0.2.0-preview.3`
-and calls `IMcpClient`, which was removed in the 1.3.0 the agent needs. Loading the extension throws
-`TypeLoadException` before discovery is ever attempted.
-
-### The token the WorkIQ servers expect
-
-The servers check for the delegated `Tools.ListInvoke.All` scope and reject anything else, including
-an app-only token minted by the agent identity:
+The Work IQ servers require a **delegated** token carrying `Tools.ListInvoke.All`, and reject
+anything else, including an app-only token minted by the agent identity:
 
 ```text
 403  Access denied: Scope 'Tools.ListInvoke.All' is not present in the request.
 ```
 
-In the two On-Behalf-Of agents the token therefore has to start from the signed-in user. In the
-Teams-hosted one that takes three hops, in
-[`Agent365/WorkIqTokenService.cs`](./dotnet-agent-teams/Agent365/WorkIqTokenService.cs):
+So the token must start from a signed-in user (or, for an AI Teammate, from its own Agentic User).
+Each agent's README documents its own chain.
 
-1. The bot channel app exchanges the user's Teams token for the blueprint's `access_agent_as_user`
-   scope. Teams SSO issues a token whose audience is the channel app, and the last hop only accepts
-   an assertion issued to the blueprint family.
-2. The blueprint requests a token-exchange assertion with `fmi_path` set to the agent identity,
-   proving it owns that identity.
-3. The agent identity performs the final On-Behalf-Of exchange for the WorkIQ audience, presenting
-   that assertion as its client credential.
+Servers are selected with the CLI, which writes `ToolingManifest.json`:
 
-The result is a token that belongs to the governed agent identity acting for the user, which is what
-tool calls have to be attributed to. The channel app holds the same consented permissions and could
-satisfy the scope check on its own, but that token would not be tied to the agent identity, so it is
-deliberately not used.
+```powershell
+a365 develop list-available
+a365 develop add-mcp-servers "mcp_MailTools" "mcp_CalendarTools" "mcp_TeamsTools"
+```
 
-The non-Teams agent runs the same chain minus the first hop, because its users sign in to the
-blueprint scope directly.
+The three .NET agents read that manifest and connect to each server directly rather than calling the
+tooling gateway's discovery endpoint, contacting each server independently so that one unavailable
+server costs only its own tools.
 
-`dotnet-agent-teammate` satisfies the same scope check from the other direction. It has no user to
-act for, so its token is delegated for its own **Agentic User**, obtained with a single call to
-`UserAuthorization.ExchangeTurnTokenAsync(turnContext, "agentic", null, ["{audience}/Tools.ListInvoke.All"], ct)`.
-Two routes that look plausible are dead ends there, and both are documented in that agent's README
-so they are not retried: an app-only token fails with `AADSTS82001`, and asking for a granular scope
-on a client-credentials flow fails with `AADSTS1002012`.
+### Why the Python agents have no Work IQ tools
 
-Either way the tools are resolved **per turn** rather than at startup, because the token only exists
-inside a turn.
+Work IQ is wired in through a framework-specific adapter package, and Microsoft does not publish one
+for Python + LangChain. `microsoft-agents-a365-tooling-extensions-agentframework`, `-openai`,
+`-googleadk`, `-semantickernel` and `-azureaifoundry` all exist on PyPI, and Node.js has a LangChain
+adapter, but `microsoft-agents-a365-tooling-extensions-langchain` does not.
+
+Nothing about Work IQ itself blocks these agents — its servers are ordinary streamable HTTP MCP
+servers, the same transport the agents already use for Microsoft Learn, and the framework-agnostic
+`microsoft-agents-a365-tooling` package exposes their urls and scopes. Only the glue is missing, so
+these demos leave it out rather than ship unsupported code.
+
+## Running an agent
+
+Open **the agent's own folder** in VS Code, not the repository root, and press <kbd>F5</kbd>. Four of
+the five carry their own `.vscode/launch.json` and `.vscode/tasks.json`; `dotnet-agent-teammate` is
+started from a terminal.
+
+| Agent | What F5 does | Reachable at |
+| --- | --- | --- |
+| `dotnet-agent-no-teams` | Builds and starts the app, then opens the browser | <https://localhost:7199> |
+| `dotnet-agent-teams` | Builds, brings the dev tunnel up, starts the agent on port 3978 | Teams |
+| `dotnet-agent-teammate` | No F5 — `dotnet run` plus `devtunnel host <name>` in two terminals, port 3980 | Teams |
+| `python-agent-no-teams` | Syncs dependencies, starts the app, opens the browser | <http://localhost:8000> |
+| `python-agent-teams` | Syncs dependencies, brings the dev tunnel up, starts the agent on port 3979 | Teams |
+
+The three Teams-hosted agents use different ports so they can run simultaneously.
+
+No agent has a switch that disables the Agent 365 exporter for local runs. A local run exports
+exactly like a production run — that is the point of the demo. Where a console exporter exists it is
+added *alongside* the Agent 365 one, never instead of it.
+
+### Environment names matter
+
+`dotnet-agent-no-teams` and `dotnet-agent-teams` run as `Development`, which is what loads **user
+secrets**. `dotnet-agent-teammate` runs as **`Production`**, because the A365 Tooling SDK selects its
+agentic token provider on the environment name and falls back to a dev provider in Development — so
+it calls `AddUserSecrets` explicitly instead.
+
+### Dev tunnels
+
+Teams cannot reach `localhost`, so each Teams-hosted agent is exposed through a **named** dev tunnel.
+Named rather than anonymous matters: a named tunnel keeps the same public url across restarts, and
+that url is registered as the agent's messaging endpoint. An anonymous tunnel issues a new url per
+run and silently breaks the channel.
+
+```powershell
+devtunnel create <tunnel-name> --allow-anonymous
+devtunnel port create <tunnel-name> --port-number 3978
+devtunnel show <tunnel-name>
+```
+
+Tunnel urls are **not** derived from the tunnel name — `devtunnel show` prints the real one. Register
+it as `<url>/api/messages`: on the Azure Bot for the two custom engine agents, or with
+`a365 setup blueprint --update-endpoint <url> --m365` for the AI Teammate, which has no Azure Bot.
+
+VS Code will not start a second copy of its own tunnel task, but it cannot see a tunnel you started
+from a terminal — close that one first to avoid two relays forwarding the same port.
