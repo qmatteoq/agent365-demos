@@ -201,6 +201,15 @@ The AI Teammate manifest has **no `bots` array and no `copilotAgents.customEngin
 
 ### How observability is instrumented
 
+> **Where this sits in the documented scenarios.** This is the one agent in the repo that matches a
+> Microsoft scenario exactly:
+> [**Agent 365-enabled using OBO**](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#agent-365-enabled-using-obo).
+> Its turns *do* carry agentic identity — `botMsaAppId` equals the blueprint id, so the platform
+> invokes it as the agentic app — which is exactly the criterion the docs select on, and why the
+> built-in `AgenticTokenCache` is the right choice here and the wrong one for the two Teams-hosted
+> **custom engine** agents. See the
+> [root README](../README.md#how-these-map-onto-microsofts-four-documented-scenarios).
+
 Wired in `Program.cs` and `Agent/LearnAgent.cs`:
 
 - **`builder.UseMicrosoftOpenTelemetry(...)`** initialises the distro.

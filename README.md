@@ -193,6 +193,38 @@ depends on whether a human is signed in, and on whether the agent has an identit
 | Teams-hosted system agent (*custom engine*) | On-behalf-of, one call: the Azure Bot OAuth connection is scoped to the observability API, and the Bot Framework Token Service performs the exchange | `dotnet-agent-teams`, `python-agent-teams` |
 | AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
 
+### How these map onto Microsoft's four documented scenarios
+
+The
+[observability authentication docs](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup)
+define four scenarios, selected on two questions: does the turn carry **agentic identity**
+(`agenticAppId` / `agenticUserId`) from the Agent 365 platform, and is the token **delegated** or
+**app-only**?
+
+| Agent | Documented scenario | Export id |
+|---|---|---|
+| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache`, no custom resolver | agentic instance id from the activity |
+| `dotnet-agent-teams` | **Custom engine using OBO** — Azure Bot OAuth connection scoped to the observability API | bot app client id |
+| `python-agent-teams` | **Custom engine using OBO** | bot app client id |
+| `dotnet-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity |
+| `python-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity |
+
+> The two **web-hosted** agents fall outside the taxonomy, and this is worth being explicit about
+> rather than pretending otherwise. All four documented scenarios assume an Agents SDK / Bot
+> Framework agent: *Custom engine using OBO* requires an **Azure Bot OAuth connection**, and these
+> two agents are plain web apps with no Azure Bot at all. So they cannot use it, and there is no
+> published scenario that covers them.
+>
+> What they do instead is a two-hop federated identity chain that makes the token's `azp` the
+> **A365 agent identity**, and they export under that same id. That satisfies the one invariant the
+> docs are actually enforcing — *the id in the export route must equal the token's `azp`, or you get
+> HTTP 403* — just with a different client. `python-agent-no-teams` is confirmed exporting; the
+> `dotnet-agent-no-teams` export has **not** been observed succeeding end to end (see its README).
+>
+> Both use the resource's `/.default` scope rather than the named `Agent365.Observability.OtelWrite`
+> the Teams agents use. On a delegated grant `/.default` resolves to whatever has been consented for
+> that resource, which here is that one scope — so the resulting token carries the same claim.
+
 > ⚠️ **The two Teams-hosted system agents are *custom engine agents*, and that classification is
 > the whole story.** Microsoft's guidance selects the scenario on one testable criterion: whether
 > the incoming turn carries **agentic identity** (`agenticAppId` / `agenticUserId`) from the

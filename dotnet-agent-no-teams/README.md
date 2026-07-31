@@ -110,7 +110,28 @@ it a token from another tenant produces
 
 When hunting traces in Defender, filter on the **agent identity**, not the blueprint id.
 
+> ⚠️ **Verification status.** The token chain below is implemented and the app runs, but a
+> successful export from *this* agent has **not been observed end to end** — no HTTP 200 from
+> `POST /observability/…/traces` has been captured in a log. The sibling `python-agent-no-teams`
+> runs the same two-hop shape and is confirmed exporting, which is the basis for expecting this one
+> to work, but that is an inference and not a measurement. To check, raise the observability log
+> level and watch for the exporter's status line on a turn. Treat this agent as the least-proven of
+> the five.
+
 ### The agent on-behalf-of chain
+
+> **Where this sits in the documented scenarios.** Microsoft's
+> [observability authentication guide](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup)
+> defines four scenarios, and **none of them covers this agent**. All four assume an Agents SDK /
+> Bot Framework agent; the closest, *Custom engine using OBO*, requires an **Azure Bot OAuth
+> connection**, and this is a plain Blazor web app with no Azure Bot. The chain below is therefore
+> this repo's own, not a documented pattern.
+>
+> It still honours the invariant the docs are enforcing — *the id in the export route must equal
+> the token's `azp`, or the service answers HTTP 403*. Here both are the **A365 agent identity**,
+> because hop 2 is performed by that identity. The Teams-hosted agents reach the same invariant
+> from the other side, with `azp` = the bot app. See the
+> [root README](../README.md#how-these-map-onto-microsofts-four-documented-scenarios).
 
 Everything the agent calls — the observability API and each WorkIQ server — is reached with a token
 for *the agent acting for the user*, minted by `Agent365/AgentOboTokenService.cs`. A plain

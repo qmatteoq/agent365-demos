@@ -115,6 +115,19 @@ Defender. Registration was done with `a365 setup all`; the generated ids live in
 
 ### Why there is a separate sign-in app
 
+> **Where this sits in the documented scenarios.** Microsoft's
+> [observability authentication guide](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup)
+> defines four scenarios, and **none of them covers this agent**. All four assume an Agents SDK /
+> Bot Framework agent; the closest, *Custom engine using OBO*, requires an **Azure Bot OAuth
+> connection**, and this is a plain FastAPI web app with no Azure Bot. The chain below is this
+> repo's own, not a documented pattern.
+>
+> It still honours the invariant the docs enforce — *the id in the export route must equal the
+> token's `azp`, or the service answers HTTP 403*. Here both are the **A365 agent identity**,
+> because hop 2 is performed by that identity. The two Teams-hosted agents reach the same
+> invariant from the other side, with `azp` = the bot app. See the
+> [root README](../README.md#how-these-map-onto-microsofts-four-documented-scenarios).
+
 An agent blueprint cannot run interactive `/authorize` flows, so a dedicated web
 client app signs the user in and asks for `api://<blueprint>/access_agent_as_user`.
 That user token is the assertion for the agent on-behalf-of chain:
