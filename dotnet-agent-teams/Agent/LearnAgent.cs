@@ -1,4 +1,5 @@
 using Microsoft.Agents.A365.Observability.Hosting.Caching;
+using Microsoft.Agents.A365.Observability.Hosting.Extensions;
 using Microsoft.Agents.A365.Observability.Runtime.Common;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Contracts;
 using Microsoft.Agents.A365.Observability.Runtime.Tracing.Scopes;
@@ -141,8 +142,18 @@ public class LearnAgent : AgentApplication
 
         // Baggage flows the tenant and agent id onto every child span the AI SDK emits. Without it
         // the exporter cannot group the spans and silently drops them.
+        //
+        // FromTurnContext adds what identifies the *human* on this turn - user.id and user.name off
+        // Activity.From - plus microsoft.channel.name, which certification requires alongside the
+        // tenant and conversation ids. Setting those by hand left every child span with no caller,
+        // so only the parent InvokeAgent span (which carries CallerDetails) knew who was asking.
+        //
+        // Order matters. FromTurnContext also writes gen_ai.agent.id from Recipient.AgenticAppId,
+        // which is null on a non-agentic Teams turn, so the explicit values have to come after it
+        // to win - BaggageBuilder keeps one dictionary and the last Set for a key survives.
         using IDisposable? baggageScope = hasObservabilityIdentity
             ? new BaggageBuilder()
+                .FromTurnContext(turnContext)
                 .TenantId(tenantId!)
                 .AgentId(agentId!)
                 .ConversationId(turnContext.Activity.Conversation?.Id ?? string.Empty)
