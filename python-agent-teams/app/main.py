@@ -77,6 +77,15 @@ AGENT_APP = AgentApplication[TurnState](
 LEARN_AGENT = LearnAgent(settings)
 TOKEN_SERVICE = ObservabilityTokenService(settings)
 
+# The user-authorization handler that fronts the Azure Bot OAuth connection. Teams signs
+# the user in through it silently via SSO, and the token it returns (audience = the bot
+# channel app) is the assertion hop 1 of the observability chain exchanges.
+#
+# Uppercase because the handler name is an environment-variable segment
+# (AGENTAPPLICATION__USERAUTHORIZATION__HANDLERS__OBO__...) and os.environ upper-cases
+# every key on Windows, so the SDK sees the handler as "OBO" regardless of how .env spells it.
+OBO_AUTH_HANDLER = environ.get("A365_OBO_AUTH_HANDLER", "OBO")
+
 
 def _caller(context: TurnContext) -> dict[str, str]:
     """Identify the Teams user driving the turn.
@@ -109,7 +118,7 @@ async def on_reset(context: TurnContext, _state: TurnState) -> None:
     await context.send_activity("Done - I've forgotten our conversation so far.")
 
 
-@AGENT_APP.activity("message")
+@AGENT_APP.activity("message", auth_handlers=[OBO_AUTH_HANDLER])
 async def on_message(context: TurnContext, _state: TurnState) -> None:
     question = (context.activity.text or "").strip()
     if not question:
@@ -117,6 +126,12 @@ async def on_message(context: TurnContext, _state: TurnState) -> None:
         return
 
     conversation_id = context.activity.conversation.id
+
+    # A365 Observability - the exporter's token is minted per turn, because the chain
+    # that satisfies the export route starts from this user's assertion. Done before the
+    # answer so the token is waiting when the first spans are flushed.
+    if OBSERVABILITY_ENABLED:
+        await _publish_observability_token(context)
 
     try:
         answer = await _answer(conversation_id, question, _caller(context))
@@ -130,6 +145,36 @@ async def on_message(context: TurnContext, _state: TurnState) -> None:
         return
 
     await context.send_activity(answer)
+
+
+async def _publish_observability_token(context: TurnContext) -> None:
+    """Mint and deposit the exporter's token for this turn.
+
+    Failures are logged and swallowed: losing traces is not a reason to fail the user's
+    question. The symptom of a failure here is an export that never happens, so the log
+    line is the only signal.
+    """
+    try:
+        token_response = await AUTHORIZATION.get_token(context, OBO_AUTH_HANDLER)
+    except Exception:
+        logger.warning(
+            "Could not get a user token from the '%s' auth handler; traces will not be "
+            "exported for this turn.",
+            OBO_AUTH_HANDLER,
+            exc_info=True,
+        )
+        return
+
+    token = getattr(token_response, "token", None)
+    if not token:
+        logger.warning(
+            "The '%s' auth handler returned no token; traces will not be exported for "
+            "this turn.",
+            OBO_AUTH_HANDLER,
+        )
+        return
+
+    await TOKEN_SERVICE.publish(token)
 
 
 async def _answer(conversation_id: str, question: str, user: dict[str, str]) -> str:
@@ -195,16 +240,6 @@ async def _auth_for_messages_only(request: Request, handler):
     return await handler(request)
 
 
-async def _start_token_service(_: Application) -> None:
-    if OBSERVABILITY_ENABLED:
-        await TOKEN_SERVICE.start()
-
-
-async def _stop_token_service(_: Application) -> None:
-    if OBSERVABILITY_ENABLED:
-        await TOKEN_SERVICE.stop()
-
-
 def create_app() -> Application:
     app = Application(middlewares=[_auth_for_messages_only])
     app.router.add_post("/api/messages", _messages)
@@ -216,10 +251,6 @@ def create_app() -> Application:
     app["agent_app"] = AGENT_APP
     app["adapter"] = ADAPTER
 
-    # The exporter needs a token before the first turn, and the refresh loop needs the
-    # running event loop, so both are bound to the application lifecycle.
-    app.on_startup.append(_start_token_service)
-    app.on_cleanup.append(_stop_token_service)
     return app
 
 

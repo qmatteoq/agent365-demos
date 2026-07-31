@@ -73,17 +73,17 @@ def init_observability(settings: Settings) -> bool:
     _apply_log_level(settings)
 
     # A365 Observability - added by instrument-observability skill
-    # A365 auth mode: s2s - the exporter's token comes from the blueprint -> agent
-    # identity token exchange in app/a365/fmi.py, refreshed on a background task.
+    # A365 auth mode: obo - a human drives every turn, so the exporter's token names both
+    # the agent identity and the caller. Minted per turn by app/a365/fmi.py.
     use_microsoft_opentelemetry(
         enable_a365=True,
         # Both flags are required: enable_a365 only registers the span processors.
         a365_enable_observability_exporter=settings.enable_a365_observability_exporter,
         # Called on the exporter's flush thread, which has no turn context.
         a365_token_resolver=token_store.get,
-        # The S2S route is the one that accepts an agent-identity token; the default
-        # route expects a delegated user token and answers 403 for this agent.
-        a365_use_s2s_endpoint=True,
+        # The delegated route. Its S2S counterpart takes application tokens only and
+        # refuses a delegated one, so the two are not interchangeable.
+        a365_use_s2s_endpoint=False,
         # Metrics add a noisy histogram dump on a timer without helping the demo.
         disable_metrics=True,
         # Records prompts and tool arguments on the spans so Defender shows content.

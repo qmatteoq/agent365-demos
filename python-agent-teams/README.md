@@ -140,17 +140,22 @@ Defender. Registration was done with `a365 setup all`; the generated ids live in
 
 | | |
 |---|---|
-| Auth mode | `s2s` (service-to-service) |
+| Auth mode | `obo` (on-behalf-of the signed-in Teams user) |
 | Blueprint | `b646f9c7-83ed-4f77-8baa-b1027797bc5d` |
 | Agent identity | `69d5a4ee-3c5e-4e8e-ba1c-0c5298b6e70a` |
 | Bot channel app | `d1fbe2ae-6c95-492f-b34a-f14451b994f5` |
+
+A human drives every turn of this agent, so its traces are exported on behalf of that
+human. Service-to-service export would work mechanically but produce traces with no
+caller, which is the wrong shape for an interactive agent and would make it useless as a
+reference for the OBO path.
 
 ### Two identities, and why they must not be merged
 
 | Identity | Used for |
 |---|---|
-| Bot channel app | Signing outbound Bot Framework replies, validating the inbound Teams token |
-| Blueprint | Hop 1 of the token exchange that authenticates the observability exporter |
+| Bot channel app | Signing outbound Bot Framework replies, validating the inbound Teams token, and hop 1 of the observability chain |
+| Blueprint | Hop 2 of the observability chain — proving it owns the agent identity |
 
 Keeping them separate is not a style choice. Entra bars agentic applications from
 client-credentials tokens (**AADSTS82001**), so the blueprint cannot sign channel traffic
@@ -170,32 +175,65 @@ the SDK needs it; the exporter's token is minted by this project's own code.
 
 ### The observability token chain
 
-Unlike the two web-hosted agents in this repo, a Teams agent has no interactive sign-in,
-so there is no user assertion to exchange. `app/a365/fmi.py` runs a service-to-service
-chain instead:
+`app/a365/fmi.py` runs a three-hop on-behalf-of chain, once per turn:
 
-1. **Hop 1** — blueprint + client secret + `fmi_path=<agent identity>` → an assertion
-   for `api://AzureADTokenExchange`.
-2. **Hop 2** — agent identity authenticates with that assertion → Observability API token.
+1. **Hop 1** — bot channel app + the user's Teams SSO token (OBO) → a token for the
+   blueprint's `access_agent_as_user` scope.
+2. **Hop 2** — blueprint + client secret + `fmi_path=<agent identity>` → an assertion for
+   `api://AzureADTokenExchange`, proving the blueprint owns the agent identity.
+3. **Hop 3** — agent identity, authenticating with that assertion as its client
+   credential and passing the hop 1 token as the user assertion (OBO) → the Observability
+   API token.
 
-The result carries `oid`/`azp` = the agent identity and the role
-`Agent365.Observability.OtelWrite`, which is what the export route requires; a delegated
-user token is rejected because its principal is the human.
+The result carries `azp` = the **agent identity** and a subject of the **human user**, and
+the delegated scope `Agent365.Observability.OtelWrite` (a named scope, not `/.default` —
+a delegated token carries scopes, not roles).
 
-MSAL Python 1.37 supports `fmi_path` on `acquire_token_for_client` natively, so both
-hops are ordinary MSAL calls. (The sibling `python-agent-no-teams` agent hand-rolls the
-same hops over raw HTTP on the belief that MSAL cannot do this — that is no longer true.)
+Hop 1 exists because the Azure Bot OAuth connection issues a token whose audience is the
+channel app, and hop 3 only accepts an assertion issued to the blueprint family.
 
-The exporter flushes on a background thread with no turn context, so the token is kept
-current by a refresh task bound to the aiohttp application lifecycle and read back through
-`app/a365/token_store.py`.
+> ⚠️ **The export route authorises on `azp`, and this is the trap.** The distro's
+> `AgenticTokenCache` performs a *plain* OBO exchange through the bot channel app, so its
+> token comes back with `azp` = the bot app and every export fails with **HTTP 403** —
+> silently, because the exporter swallows the error and simply never sends.
+>
+> Probed live with a single token and a zero-length protobuf body (a valid empty OTLP
+> request), varying only the agent id in the URL:
+>
+> | id in the route | response |
+> |---|---|
+> | agent identity | **403** |
+> | blueprint | **403** |
+> | bot channel app (the token's `azp`) | **415** — authorised, wrong content type |
+>
+> So the id in the route must equal the token's `azp`. Posting under the bot app id would
+> "work" but file the traces against the wrong agent. The fix is to make the token's `azp`
+> *be* the agent identity — hence the three-hop chain above.
+
+> The blueprint never performs the final exchange itself: Entra bars agentic applications
+> from client-credentials flows (`AADSTS82001`). It only proves ownership at hop 2.
+
+MSAL Python 1.37 supports `fmi_path` on `acquire_token_for_client` natively, so all three
+hops are ordinary MSAL calls. (The sibling `python-agent-no-teams` agent hand-rolls its
+hops over raw HTTP on the belief that MSAL cannot do this — that is no longer true.)
+
+The exporter flushes on a background thread with no turn context, so it cannot run this
+chain itself. The token is minted in the message handler, while the user's assertion is
+still in hand, and deposited in `app/a365/token_store.py` for the exporter's resolver to
+read back. It is cached until five minutes before expiry, so most turns cost nothing.
 
 ### Instrumentation notes
 
 * `init_observability` runs in `app/main.py` **before** `app.agent` is imported,
   otherwise auto-instrumentation cannot patch LangChain and the Azure OpenAI client.
-* `a365_use_s2s_endpoint=True` selects the route that accepts an agent-identity token.
-  The default route expects a delegated user token and answers 403.
+* `a365_use_s2s_endpoint=False` selects the delegated route. Its S2S counterpart takes
+  application tokens only and refuses a delegated one, so the two are not interchangeable.
+* The message route declares `auth_handlers=[OBO]`, which is what makes the SDK complete
+  the Teams SSO sign-in before the handler runs. Sign-in is attached to that route alone —
+  attaching it globally would prompt on the install-time `conversationUpdate` too.
+* The handler name is spelled **uppercase**. It is an environment-variable segment
+  (`AGENTAPPLICATION__USERAUTHORIZATION__HANDLERS__OBO__…`) and `os.environ` upper-cases
+  every key on Windows, so the SDK only ever sees `OBO`.
 * Every turn runs inside a `BaggageBuilder` scope. Spans emitted outside one are dropped
   by the exporter as *"Partitioned into 0 identity groups"*.
 * `InvokeAgentScope` is used as a context manager. Entering it attaches the span to the

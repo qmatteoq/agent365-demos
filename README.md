@@ -129,9 +129,9 @@ from a terminal, so close that one first to avoid two relays forwarding the same
 | Capability | `dotnet-agent-no-teams` | `dotnet-agent-teams` | `dotnet-agent-teammate` | `python-agent-no-teams` | `python-agent-teams` |
 | --- | --- | --- | --- | --- | --- |
 | Agent identity and blueprint | Yes | Yes | Yes, an AI Teammate | Yes | Yes |
-| Observability instrumentation | Yes, exported on-behalf-of | Yes, exported on-behalf-of | Yes, exported as the agentic user | Yes, exported on-behalf-of | Yes, exported service-to-service |
+| Observability instrumentation | Yes, exported on-behalf-of | Yes, exported on-behalf-of | Yes, exported as the agentic user | Yes, exported on-behalf-of | Yes, exported on-behalf-of |
 | WorkIQ tools | Yes — mail, calendar, Teams | Yes — mail, calendar, Teams; see the note below | Yes — mail and calendar | No, see the note below | No, see the note below |
-| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | None — the agent has its own identity | Sign-in through a separate web client app | Teams identity only; no OBO needed |
+| User authentication | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO | None — the agent has its own identity | Sign-in through a separate web client app | On-Behalf-Of through Teams SSO |
 
 ### Why the Python agents have no WorkIQ tools
 
@@ -184,24 +184,29 @@ depends on whether a human is signed in, and on whether the agent has an identit
 | | Chain | Used by |
 | --- | --- | --- |
 | Web-hosted | On-behalf-of: the user's token is the assertion, so the token represents *the agent acting for the user* | `dotnet-agent-no-teams`, `python-agent-no-teams` |
-| Teams-hosted system agent | On-behalf-of, three hops: bot app re-targets the Teams SSO token to the blueprint, blueprint proves ownership via `fmi_path`, agent identity performs the final exchange | `dotnet-agent-teams` |
-| Teams-hosted system agent (S2S) | Service-to-service: blueprint `fmi_path` exchange, then the agent identity authenticates with the resulting assertion — **no user in the token** | `python-agent-teams` |
+| Teams-hosted system agent | On-behalf-of, three hops: bot app re-targets the Teams SSO token to the blueprint, blueprint proves ownership via `fmi_path`, agent identity performs the final exchange | `dotnet-agent-teams`, `python-agent-teams` |
 | AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
 
-> ⚠️ **`dotnet-agent-teams` moved from S2S to OBO, and the export route explains why the obvious
-> OBO wiring fails.** The auth mode is decided by whether a human is in the loop at runtime, not by
-> where the agent is hosted — a Teams agent has a user on every turn, so it belongs on OBO. But the
-> distro's `AgenticTokenCache` does a *plain* on-behalf-of exchange through the bot channel app, and
-> the export route authorises on the token's `azp`: it must equal the agent id in the URL. Probed on
-> the live endpoint with one token against three ids — agent identity **403**, blueprint **403**, bot
-> app **415** (authorised, wrong content type). The working chain therefore ends in an exchange
+> ⚠️ **Both Teams-hosted system agents moved from S2S to OBO, and the export route explains why the
+> obvious OBO wiring fails.** The auth mode is decided by whether a human is in the loop at runtime,
+> not by where the agent is hosted — a Teams agent has a user on every turn, so it belongs on OBO. But
+> the distro's `AgenticTokenCache` does a *plain* on-behalf-of exchange through the bot channel app,
+> and the export route authorises on the token's `azp`: it must equal the agent id in the URL. Probed
+> on the live endpoint with one token against three ids — agent identity **403**, blueprint **403**,
+> bot app **415** (authorised, wrong content type). The working chain therefore ends in an exchange
 > performed *by the agent identity for the user*, giving `azp` = agent identity and the human as
 > subject. See [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
->
-> `python-agent-teams` still uses S2S and has the same issue in principle. Not yet migrated.
 
-In the web-hosted and S2S cases a plain delegated user token is rejected by the export route, because
-its principal is the human rather than the agent.
+In the web-hosted case a plain delegated user token is rejected by the export route, because its
+principal is the human rather than the agent.
+
+The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
+behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from
+requesting app-only tokens at all (**`AADSTS82001`**). Its tokens come from
+`UserAuthorization.ExchangeTurnTokenAsync(turnContext, "agentic", …)`, which runs a three-hop chain
+ending in a `grant_type=user_fic` exchange. That last hop is *delegated*, for the Agentic User
+rather than for a human. See
+[`dotnet-agent-teammate/README.md`](./dotnet-agent-teammate/README.md) for the full chain.
 
 The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
 behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from

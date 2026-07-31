@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     agent365observability__clientsecret: str = ""
     a365_observability_log_level: str = "warn|error"
 
+    # -- Bot channel app ----------------------------------------------------------
+    # The Agents SDK reads these from the environment itself; they are mirrored into
+    # this model because hop 1 of the observability token chain needs them too.
+    connections__service_connection__settings__clientid: str = ""
+    connections__service_connection__settings__clientsecret: str = ""
+
     # Short aliases: the stamped names are unwieldy at every call site.
     @property
     def a365_agent_id(self) -> str:
@@ -67,7 +73,7 @@ class Settings(BaseSettings):
 
     @property
     def a365_blueprint_id(self) -> str:
-        # The blueprint is both the observability client and hop 1 of the token chain,
+        # The blueprint is both the observability client and hop 2 of the token chain,
         # so the CLI writes the same GUID to two keys. Prefer the explicit one.
         return (
             self.agent365observability__agentblueprintid
@@ -79,13 +85,29 @@ class Settings(BaseSettings):
         return self.agent365observability__clientsecret
 
     @property
+    def bot_client_id(self) -> str:
+        """The bot channel app, which performs hop 1 of the observability token chain.
+
+        Read from the Agents SDK's own connection settings rather than duplicated: the
+        OBO exchange has to be done by the same app the Azure Bot OAuth connection is
+        registered to, so a second copy of this value could only ever drift.
+        """
+        return self.connections__service_connection__settings__clientid
+
+    @property
+    def bot_client_secret(self) -> str:
+        return self.connections__service_connection__settings__clientsecret
+
+    @property
     def a365_configured(self) -> bool:
-        """True when every value the S2S token chain needs is present."""
+        """True when every value the observability token chain needs is present."""
         return bool(
             self.a365_agent_id
             and self.a365_tenant_id
             and self.a365_blueprint_id
             and self.a365_blueprint_secret
+            and self.bot_client_id
+            and self.bot_client_secret
         )
 
 
