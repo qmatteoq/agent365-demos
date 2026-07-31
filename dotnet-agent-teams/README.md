@@ -224,6 +224,12 @@ Per turn, in `Agent/LearnAgent.cs`:
   `.TenantId()` / `.AgentId()` / `.ConversationId()` calls come **after** it deliberately:
   `FromTurnContext` also writes `gen_ai.agent.id` from `Recipient.AgenticAppId`, which is null on a
   non-agentic Teams turn, and the builder keeps one dictionary where the last write per key wins.
+  `.AgentName()`, `.AgentBlueprintId()` and `.SessionId()` are chained too, from configuration —
+  the activity carries none of them. It is easy to think `AgentDetails` on the `InvokeAgentScope`
+  below covers this, since it names the same three; it does not. **`AgentDetails` decorates only
+  the parent span.** Omit them here and every `execute_tool` and `chat` row arrives with a bare
+  agent id and no blueprint — and the blueprint is what groups instances of the same agent
+  together in reporting.
 - An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`, and
   is given `CallerDetails` so the parent span names the human as well.
 - **No manual `InferenceScope` or `ExecuteToolScope`.** The chat client is wrapped with

@@ -151,12 +151,23 @@ public class LearnAgent : AgentApplication
         // Order matters. FromTurnContext also writes gen_ai.agent.id from Recipient.AgenticAppId,
         // which is null on a non-agentic Teams turn, so the explicit values have to come after it
         // to win - BaggageBuilder keeps one dictionary and the last Set for a key survives.
+        //
+        // The name, blueprint and session are not on the activity, so they come from configuration.
+        // AgentDetails on the InvokeAgentScope below sets the same three, but that only reaches the
+        // parent span; leaving them out here left every execute_tool and chat row with a bare agent
+        // id and no blueprint, which is what groups instances of the same agent together.
+        var baggageConfig = _configuration.GetSection("Agent365Observability");
+        var baggageConversationId = turnContext.Activity.Conversation?.Id ?? string.Empty;
+
         using IDisposable? baggageScope = hasObservabilityIdentity
             ? new BaggageBuilder()
                 .FromTurnContext(turnContext)
                 .TenantId(tenantId!)
                 .AgentId(agentId!)
-                .ConversationId(turnContext.Activity.Conversation?.Id ?? string.Empty)
+                .AgentName(baggageConfig["AgentName"] ?? "LearnTeamsAgent")
+                .AgentBlueprintId(baggageConfig["AgentBlueprintId"] ?? string.Empty)
+                .ConversationId(baggageConversationId)
+                .SessionId(baggageConversationId)
                 .Build()
             : null;
 
