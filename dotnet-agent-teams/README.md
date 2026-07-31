@@ -403,4 +403,3 @@ Verified working on a live Teams turn: all three servers connect and expose 74 t
   package; it is a sample-local `AspNetExtensions.cs` you copy in.
   `dotnet-agent-teammate` has the same gap.
 - The bot app secret for `0cf93255-…` has been exposed and still wants rotating.
-````
