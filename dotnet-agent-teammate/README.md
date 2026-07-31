@@ -216,13 +216,22 @@ Wired in `Program.cs` and `Agent/LearnAgent.cs`:
 - **`UseS2SEndpoint` is left at its default.** The agentic-user path posts to `/observability/`;
   the S2S route is for the FMI chain that `dotnet-agent-teams` uses, and the two routes do not
   accept each other's tokens.
+- **`BaggageBackfillProcessor` is registered before the distro**, and the order is load-bearing.
+  See [why the inference span needs it](#why-the-inference-span-needs-a-backfill-processor).
 
 Per turn, in `LearnAgent.ResearchAsync`:
 
 - The agent id is `turnContext.Activity.GetAgenticInstanceId()` — the **agentic instance id from
   the activity**, not a value decoded from a user token, and not the blueprint id.
-- The turn runs inside a **`BaggageBuilder`** scope carrying tenant and agent id. Spans emitted
-  outside one are dropped by the exporter as *"Partitioned into 0 identity groups"*.
+- The turn runs inside a **`BaggageBuilder`** scope. Spans emitted outside one are dropped by the
+  exporter as *"Partitioned into 0 identity groups"*. The chain starts with
+  **`.FromTurnContext(turnContext)`**, which supplies the caller (`user.id`, `user.name`), the
+  channel, the conversation and the agentic user, then sets tenant, agent id, agent name, blueprint
+  and session explicitly. Order matters: `FromTurnContext` also writes `gen_ai.agent.id` from
+  `Recipient.AgenticAppId`, so the explicit values come afterwards to win — `BaggageBuilder` keeps a
+  single dictionary and the last write for a key survives.
+- Baggage is what reaches the **child** spans. `CallerDetails` on the `InvokeAgentScope` only
+  decorates the parent, so without the baggage the tool and model spans arrive anonymous.
 - The exporter's token is registered through `AgenticTokenStruct(userAuthorization, turnContext,
   authHandlerName)`, because the exporter flushes on a background thread that has no turn context
   of its own.
@@ -234,6 +243,62 @@ A healthy turn logs an HTTP 200 to
 `…/observability/tenants/<tenant>/otlp/agents/<auid>/traces` and produces
 `invoke_agent`, `chat gpt-4.1` and `execute_tool …` spans. Traces take roughly 15–90 minutes to
 surface in Advanced Hunting.
+
+Verified on a live Teams turn — both the parent `invoke_agent` and its children carry:
+
+```
+user.id:                 f63ffdb5-…      the human who asked
+user.name:               MOD Administrator
+microsoft.agent.user.id: da59c9d2-…      the Agentic User the teammate runs as
+microsoft.channel.name:  msteams
+```
+
+Both identities are recorded, which is what you want for a teammate: the agent acts under its own
+identity, but the turn is still attributable to the person who started it.
+
+#### Why the inference span needs a backfill processor
+
+The SDK's `ActivityProcessor` copies baggage onto spans in **`OnStart`**, and only for spans that
+already carry a `gen_ai.operation.name` tag. That holds for the scopes the A365 SDK creates itself,
+which set the tag as they start.
+
+It does not hold for the model call. Microsoft.Extensions.AI creates that span with
+
+```csharp
+activity = _activitySource.StartActivity("chat " + model, ActivityKind.Client);
+```
+
+and sets its tags **afterwards** — verified by decompiling `OpenTelemetryChatClient`. At `OnStart`
+there is nothing to match on, no baggage is copied, and the exporter later drops the span:
+
+```
+[Agent365Exporter] 1 spans skipped due to missing tenant or agent ID
+```
+
+The prompt, the system instructions and the completion go with it — so Defender records that a turn
+happened and which tools ran, but never what the model was asked or what it said.
+
+`Agent365/BaggageBackfillProcessor.cs` runs the same copy at **`OnEnd`**, when the tag exists.
+`OnEnd` is raised synchronously on the thread that stops the activity, so `Baggage.Current` is still
+the turn's baggage. It is deliberately narrow: only the SDK's own allowlisted operations, skipped
+entirely if the span was already enriched (tested on `microsoft.tenant.id`, the field the exporter
+partitions on), never overwriting a tag the instrumentation set itself, and identity keys only —
+message content belongs to the span, not to the turn.
+
+Registration order is what makes it work. Processors' `OnEnd` runs in registration order, so it is
+added **before** `UseMicrosoftOpenTelemetry` to sit ahead of the export processor.
+
+Measured on the same turn, before and after:
+
+| | Before | After |
+| --- | --- | --- |
+| Exporter log | `1 spans skipped` | no skips |
+| Export chunk | 1 span, 2,247 bytes | 2 spans, 99,255 bytes |
+
+> ⚠️ This is a **workaround for an SDK timing quirk, not a supported extension point** — the distro
+> exposes no processor hook. If a future SDK version enriches at `OnEnd` too, the guard makes this a
+> no-op rather than a conflict. `MaxPayloadBytes` defaults to 900,000 and the largest observed chunk
+> is ~155 KB, so the extra content has ample headroom.
 
 ### How WorkIQ is wired
 

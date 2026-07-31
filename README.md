@@ -150,6 +150,32 @@ plain web app does not have. `python-agent-no-teams` already works around the sa
 observability with its own on-behalf-of chain, so the adapter is writable - it is simply unsupported
 code, so these demos leave it out.
 
+### Emitting a span is not the same as exporting it
+
+All three .NET agents register a small `BaggageBackfillProcessor` before
+`UseMicrosoftOpenTelemetry`, and without it the **model call never reaches Agent 365**.
+
+The SDK copies identity from baggage onto spans in `OnStart`, and only for spans that already carry
+a `gen_ai.operation.name` tag. The scopes the A365 SDK creates itself set that tag as they start, so
+`invoke_agent` and `execute_tool` are fine. Microsoft.Extensions.AI does not: it creates its `chat`
+span with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags afterwards
+(verified by decompiling `OpenTelemetryChatClient`). The enrichment therefore misses it and the
+exporter drops it:
+
+```
+[Agent365Exporter] 1 spans skipped due to missing tenant or agent ID
+```
+
+The prompt, the system instructions and the completion go with it — Defender records that a turn
+happened and which tools ran, but not what the model was asked or what it answered. The console
+exporter still shows the span, which is what makes this easy to miss.
+
+The processor re-runs the same copy at `OnEnd`, when the tag exists. On one measured turn the export
+went from *1 span / 2,247 bytes* to *2 spans / 99,255 bytes*.
+
+> This is a workaround for an SDK timing quirk, not a supported extension point — the distro exposes
+> no processor hook. Whether the Python SDK has the same gap has **not** been checked.
+
 ### Three ways to authenticate the observability exporter
 
 The exporter's token must have the *agent identity* as its principal, but how the agent gets there
@@ -161,10 +187,17 @@ depends on whether a human is signed in, and on whether the agent has an identit
 | Teams-hosted system agent | Service-to-service: blueprint `fmi_path` exchange, then the agent identity authenticates with the resulting assertion | `dotnet-agent-teams`, `python-agent-teams` |
 | AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
 
-A Teams-hosted system agent has no interactive web sign-in and therefore no user assertion to
-exchange, which is what forces the second shape. In both of the first two cases a plain delegated
-user token is rejected by the export route, because its principal is the human rather than the
-agent.
+> ⚠️ **The second shape is under review.** The reason previously given here — that a Teams-hosted
+> system agent has no interactive sign-in and therefore no user assertion to exchange — is wrong.
+> Hop 1 of `dotnet-agent-teams`' own WorkIQ chain exchanges the user's Teams SSO token on every
+> turn, so a user assertion *is* available and the on-behalf-of shape was possible. Microsoft's
+> guidance picks the auth mode on whether a user is in the loop at runtime, which for a Teams agent
+> means OBO. Attribution is *not* the deciding factor: the caller travels in baggage, not in the
+> export token, and survives the S2S route — verified on a live turn. See
+> [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
+
+In both of the first two cases a plain delegated user token is rejected by the export route, because
+its principal is the human rather than the agent.
 
 The AI Teammate is different again: it *has* an identity of its own, so there is nothing to act on
 behalf of. It cannot use the service-to-service shape either — Entra bars agentic applications from

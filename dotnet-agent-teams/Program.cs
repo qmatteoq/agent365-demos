@@ -14,6 +14,8 @@ using Microsoft.Extensions.AI;
 using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
 using OpenAI.Chat;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,6 +35,14 @@ builder.Services.AddAgent365Observability();
 // The cache is resolved after Build(), so the resolver closes over the variable rather than
 // capturing its (still null) value here.
 IExporterTokenCache<string>? observabilityTokenCache = null;
+
+// Registered before UseMicrosoftOpenTelemetry so this processor sits ahead of the Agent 365 export
+// processor in the pipeline: OnEnd runs in registration order, and the identity has to be on the
+// span before the exporter reads it. Without it the inference span - the prompt, the system
+// instructions and the completion - is dropped. See BaggageBackfillProcessor.
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddProcessor(new BaggageBackfillProcessor()));
+
 builder.UseMicrosoftOpenTelemetry(o =>
 {
     o.Exporters = builder.Environment.IsDevelopment()

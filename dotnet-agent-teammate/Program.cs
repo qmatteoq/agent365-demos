@@ -12,6 +12,8 @@ using Microsoft.Extensions.AI;
 using Microsoft.OpenTelemetry;
 using ModelContextProtocol.Client;
 using OpenAI.Chat;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
 
 // Two things key off "is this a local run?", and they must stay separable. The A365 Tooling SDK
 // picks DevMcpTokenProvider (which demands a hand-pasted BEARER_TOKEN) when ASPNETCORE_ENVIRONMENT
@@ -43,6 +45,12 @@ builder.Services.AddHttpContextAccessor();
 // Microsoft.OpenTelemetry 1.0.7 - without this the host fails to start.
 var agenticTokenCache = new AgenticTokenCache();
 builder.Services.AddSingleton<IExporterTokenCache<AgenticTokenStruct>>(agenticTokenCache);
+
+// Registered before UseMicrosoftOpenTelemetry so this processor sits ahead of the Agent 365 export
+// processor in the pipeline: OnEnd runs in registration order, and the identity has to be on the
+// span before the exporter reads it. See BaggageBackfillProcessor for what it is fixing.
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddProcessor(new BaggageBackfillProcessor()));
 
 builder.UseMicrosoftOpenTelemetry(o =>
 {
