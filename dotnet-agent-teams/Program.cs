@@ -25,16 +25,17 @@ builder.Services.AddHttpClient();
 // The exporter posts traces with a delegated token so the trace is written under the identity of
 // the person who asked, rather than under a service principal.
 //
-// It does NOT use the distro's AgenticTokenCache. That performs a plain on-behalf-of exchange
-// through the bot channel app, so the token comes back with azp = the bot app, and the export
-// route rejects it with HTTP 403: the service requires the agent id in the URL to match the
-// token's client. Verified by probing the live endpoint with one token against three ids -
-// agent identity 403, blueprint 403, bot app 415 (i.e. authorised, wrong content type).
+// This is the documented "custom engine using OBO" path: these turns carry no agentic identity
+// (verified - agenticAppId and agenticUserId are both absent), so the Azure Bot OAuth connection
+// named oboConnectionProfile is scoped to the observability API and the Bot Framework Token
+// Service performs the on-behalf-of exchange itself. A single GetTurnTokenAsync returns the
+// finished token.
 //
-// WorkIqTokenService already mints exactly the right shape for the WorkIQ servers - a three-hop
-// chain ending in an exchange performed BY the agent identity FOR the user - so the observability
-// token is minted the same way. That yields azp = agent identity and the user as subject, which
-// satisfies both the route and caller attribution.
+// The id in the export URL is the app registration's client id to match, because the route
+// authorises only when the token's azp equals the id in the URL. Probed against the live service
+// with one token and three ids: agent identity 403, blueprint 403, bot app 415 (authorised, wrong
+// content type). See LearnAgent.ResolveObservabilityIdentity, and
+// https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup
 var observabilityTokenStore = new ObservabilityTokenStore();
 builder.Services.AddSingleton(observabilityTokenStore);
 
@@ -151,9 +152,11 @@ builder.Services.AddSingleton<AIAgent>(sp =>
     };
 
     // A365 Observability — best-effort instrumentation (verify against official sample)
-    // Pin the agent id to the Agent 365 agent identity. Left unset, the SDK generates a fresh GUID
-    // per agent and the exporter produces orphan identity groups it cannot authenticate.
-    var observabilityAgentId = builder.Configuration["Agent365Observability:AgentId"];
+    // Pin the agent id so it matches the id the exporter puts in the export URL and looks the
+    // token up by. Left unset, the SDK generates a fresh GUID per agent and the exporter produces
+    // orphan identity groups it cannot authenticate. For a custom engine agent that id is the app
+    // registration's client id - see LearnAgent.ResolveObservabilityIdentity.
+    var observabilityAgentId = builder.Configuration["Connections:BotConnection:Settings:ClientId"];
     if (!string.IsNullOrEmpty(observabilityAgentId))
     {
         options.Id = observabilityAgentId;

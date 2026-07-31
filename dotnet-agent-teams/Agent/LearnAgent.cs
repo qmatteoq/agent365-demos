@@ -36,9 +36,10 @@ public class LearnAgent : AgentApplication
     private readonly LearnMcpTools _learnTools;
     private readonly IConfiguration _configuration;
     private readonly ObservabilityTokenStore _observabilityTokens;
-    private readonly WorkIqTokenService _workIqTokens;
     private readonly string? _agenticAuthHandlerName;
     private readonly string? _oboAuthHandlerName;
+    private readonly string? _observabilityAuthHandlerName;
+    private bool _turnIdentityLogged;
 
     public LearnAgent(
         AgentApplicationOptions options,
@@ -48,7 +49,6 @@ public class LearnAgent : AgentApplication
         LearnMcpTools learnTools,
         IConfiguration configuration,
         ObservabilityTokenStore observabilityTokens,
-        WorkIqTokenService workIqTokens,
         ILogger<LearnAgent> logger) : base(options)
     {
         _agent = agent;
@@ -58,11 +58,11 @@ public class LearnAgent : AgentApplication
         _learnTools = learnTools;
         _configuration = configuration;
         _observabilityTokens = observabilityTokens;
-        _workIqTokens = workIqTokens;
 
         // The handler names come from AgentApplication:UserAuthorization:Handlers in appsettings.json.
         _agenticAuthHandlerName = configuration["AgentApplication:AgenticAuthHandlerName"] ?? "agentic";
         _oboAuthHandlerName = configuration["AgentApplication:OboAuthHandlerName"];
+        _observabilityAuthHandlerName = configuration["AgentApplication:ObservabilityAuthHandlerName"];
 
         OnConversationUpdate(ConversationUpdateEvents.MembersAdded, WelcomeAsync);
         OnMessage("/reset", ResetAsync);
@@ -72,13 +72,24 @@ public class LearnAgent : AgentApplication
         // AutoSignIn fires on every activity - including the conversationUpdate raised when the
         // app is installed - so the user was prompted (and saw a failure) before they had even
         // asked anything. Only a real question needs the Microsoft 365 tools.
-        if (!string.IsNullOrEmpty(_oboAuthHandlerName))
+        //
+        // Both handlers sign in here: "obo" backs the WorkIQ token exchange and "observability"
+        // backs the exporter. They front different Azure Bot OAuth connections, so they yield
+        // tokens for different audiences, but they share a tokenExchangeUrl and both resolve
+        // silently through Teams SSO.
+        string[] signInHandlers =
+        [
+            .. (string.IsNullOrEmpty(_oboAuthHandlerName) ? Array.Empty<string>() : [_oboAuthHandlerName]),
+            .. (string.IsNullOrEmpty(_observabilityAuthHandlerName) ? Array.Empty<string>() : [_observabilityAuthHandlerName]),
+        ];
+
+        if (signInHandlers.Length > 0)
         {
             OnActivity(
                 ActivityTypes.Message,
                 OnMessageAsync,
                 rank: RouteRank.Last,
-                autoSignInHandlers: [_oboAuthHandlerName]);
+                autoSignInHandlers: signInHandlers);
         }
         else
         {
@@ -238,14 +249,20 @@ public class LearnAgent : AgentApplication
     /// </summary>
 
     /// <summary>
-    /// Mints the Observability API token for this turn and deposits it for the exporter.
+    /// Deposits the Observability API token for this turn.
     /// </summary>
     /// <remarks>
-    /// Verified against the live service: posting to
-    /// <c>/observability/tenants/{tenant}/otlp/agents/{agentId}/traces</c> is authorised only when
-    /// the token's <c>azp</c> equals <c>{agentId}</c>. The same token was accepted for the bot app
-    /// id and refused (403) for both the agent identity and the blueprint, so the exchange has to
-    /// be performed by the agent identity itself - which is what the three-hop chain does.
+    /// On a custom engine turn there is nothing to exchange here: the Azure Bot OAuth connection
+    /// behind the observability handler carries the observability scope, so the Bot Framework
+    /// Token Service performs the on-behalf-of exchange and <c>GetTurnTokenAsync</c> hands back a
+    /// token already scoped to the resource.
+    /// <para>
+    /// The token is filed under the same id the exporter puts in
+    /// <c>/observability/tenants/{tenant}/otlp/agents/{agentId}/traces</c>, because that route
+    /// authorises only when the token's <c>azp</c> equals <c>{agentId}</c> - which for a custom
+    /// engine agent is the app registration's client id. See
+    /// https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup
+    /// </para>
     /// </remarks>
     private async Task PublishObservabilityTokenAsync(
         ITurnContext turnContext,
@@ -255,7 +272,7 @@ public class LearnAgent : AgentApplication
     {
         var handlerName = turnContext.Activity.IsAgenticRequest()
             ? _agenticAuthHandlerName
-            : _oboAuthHandlerName ?? _agenticAuthHandlerName;
+            : _observabilityAuthHandlerName ?? _oboAuthHandlerName ?? _agenticAuthHandlerName;
 
         if (string.IsNullOrEmpty(handlerName))
         {
@@ -266,26 +283,13 @@ public class LearnAgent : AgentApplication
 
         try
         {
-            var userAssertion = await UserAuthorization
+            var token = await UserAuthorization
                 .GetTurnTokenAsync(turnContext, handlerName, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-
-            if (string.IsNullOrEmpty(userAssertion))
-            {
-                _logger.LogWarning("No user token this turn; traces cannot be exported.");
-                return;
-            }
-
-            var token = await _workIqTokens
-                .GetTokenForScopeAsync(
-                    userAssertion,
-                    EnvironmentUtils.GetObservabilityAuthenticationScope()[0],
-                    cancellationToken)
                 .ConfigureAwait(false);
 
             if (string.IsNullOrEmpty(token))
             {
-                _logger.LogWarning("Could not mint an observability token; traces will not be exported.");
+                _logger.LogWarning("No user token this turn; traces cannot be exported.");
                 return;
             }
 
@@ -297,6 +301,16 @@ public class LearnAgent : AgentApplication
         }
     }
 
+    /// <summary>
+    /// Resolves the identity the exporter partitions and authenticates by.
+    /// </summary>
+    /// <remarks>
+    /// The documented scenarios split on whether the turn carries agentic identity. An agentic
+    /// turn has an instance id and uses it; a classic Teams turn has none, which makes this a
+    /// custom engine agent, and the id must then be the app registration's client id - the same
+    /// app the observability token is issued to. Using the Agent 365 agent identity here is what
+    /// produced the earlier HTTP 403: nothing on a custom engine turn can make it the token's azp.
+    /// </remarks>
     private (string? AgentId, string? TenantId) ResolveObservabilityIdentity(ITurnContext turnContext)
     {
         var agentId = turnContext.Activity.IsAgenticRequest()
@@ -305,12 +319,22 @@ public class LearnAgent : AgentApplication
 
         if (string.IsNullOrEmpty(agentId))
         {
-            agentId = _configuration["Agent365Observability:AgentId"];
+            agentId = _configuration["Connections:BotConnection:Settings:ClientId"];
         }
 
         var tenantId = turnContext.Activity.Conversation?.TenantId
                     ?? turnContext.Activity.Recipient?.TenantId
                     ?? _configuration["Agent365Observability:TenantId"];
+
+        if (!_turnIdentityLogged)
+        {
+            _turnIdentityLogged = true;
+            _logger.LogInformation(
+                "Turn identity: isAgenticRequest={IsAgentic} agenticInstanceId={InstanceId} -> exporting under agent id {AgentId}",
+                turnContext.Activity.IsAgenticRequest(),
+                turnContext.Activity.IsAgenticRequest() ? turnContext.Activity.GetAgenticInstanceId() : "(none)",
+                agentId);
+        }
 
         return (agentId, tenantId);
     }
