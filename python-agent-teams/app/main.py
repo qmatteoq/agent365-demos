@@ -31,7 +31,7 @@ from microsoft_agents.hosting.core import (
 load_dotenv(path.join(path.dirname(path.dirname(path.abspath(__file__))), ".env"))
 
 from app.config import settings  # noqa: E402  (must follow load_dotenv)
-from app.a365.fmi import ObservabilityTokenService  # noqa: E402
+from app.a365.token_store import token_store  # noqa: E402
 from app.a365.observability import (  # noqa: E402
     build_baggage_scope,
     init_observability,
@@ -75,16 +75,20 @@ AGENT_APP = AgentApplication[TurnState](
 )
 
 LEARN_AGENT = LearnAgent(settings)
-TOKEN_SERVICE = ObservabilityTokenService(settings)
 
-# The user-authorization handler that fronts the Azure Bot OAuth connection. Teams signs
-# the user in through it silently via SSO, and the token it returns (audience = the bot
-# channel app) is the assertion hop 1 of the observability chain exchanges.
+# The user-authorization handler fronting the Azure Bot OAuth connection named
+# `oboConnectionProfile`, whose Scopes are set to the Agent 365 Observability API. That
+# scope is the whole trick: the Bot Framework Token Service performs the on-behalf-of
+# exchange itself, so a single get_token returns a token already scoped to the
+# observability resource. No MSAL, no FMI chain.
 #
 # Uppercase because the handler name is an environment-variable segment
-# (AGENTAPPLICATION__USERAUTHORIZATION__HANDLERS__OBO__...) and os.environ upper-cases
-# every key on Windows, so the SDK sees the handler as "OBO" regardless of how .env spells it.
+# (AGENTAPPLICATION__USERAUTHORIZATION__HANDLERS__OBO__...) and load_configuration_from_env
+# upper-cases every key, so the SDK sees the handler as "OBO" regardless of how .env spells it.
 OBO_AUTH_HANDLER = environ.get("A365_OBO_AUTH_HANDLER", "OBO")
+
+# Set after the first turn has reported whether it carried agentic identity.
+_turn_identity_logged = False
 
 
 def _caller(context: TurnContext) -> dict[str, str]:
@@ -148,12 +152,34 @@ async def on_message(context: TurnContext, _state: TurnState) -> None:
 
 
 async def _publish_observability_token(context: TurnContext) -> None:
-    """Mint and deposit the exporter's token for this turn.
+    """Deposit the exporter's token for this turn.
+
+    ``get_token`` returns a token *already* scoped to the observability API, because the
+    Azure Bot OAuth connection behind this handler is configured with that scope and the
+    Bot Framework Token Service does the on-behalf-of exchange internally. There is
+    nothing left to exchange here -- the token only has to be filed under the id the
+    exporter will look it up by.
 
     Failures are logged and swallowed: losing traces is not a reason to fail the user's
     question. The symptom of a failure here is an export that never happens, so the log
     line is the only signal.
     """
+    # Evidence, not assumption: the documented scenario split turns on whether the turn
+    # carries agentic identity. A custom engine agent's turns do not, which is why the
+    # observability agent id has to come from configuration instead. Logged once, at
+    # INFO, because it is the single fact that decides which token path is correct.
+    global _turn_identity_logged
+    if not _turn_identity_logged:
+        _turn_identity_logged = True
+        recipient = context.activity.recipient
+        logger.info(
+            "Turn identity: agentic_app_id=%r agentic_user_id=%r -> custom engine agent, "
+            "exporting under app registration %s.",
+            getattr(recipient, "agentic_app_id", None),
+            getattr(recipient, "agentic_user_id", None),
+            settings.observability_agent_id,
+        )
+
     try:
         token_response = await AUTHORIZATION.get_token(context, OBO_AUTH_HANDLER)
     except Exception:
@@ -174,7 +200,8 @@ async def _publish_observability_token(context: TurnContext) -> None:
         )
         return
 
-    await TOKEN_SERVICE.publish(token)
+    # Keyed by the same id the exporter puts in the URL; see Settings.observability_agent_id.
+    token_store.set(settings.observability_agent_id, settings.a365_tenant_id, token)
 
 
 async def _answer(conversation_id: str, question: str, user: dict[str, str]) -> str:

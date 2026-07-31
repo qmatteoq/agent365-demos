@@ -73,8 +73,9 @@ def init_observability(settings: Settings) -> bool:
     _apply_log_level(settings)
 
     # A365 Observability - added by instrument-observability skill
-    # A365 auth mode: obo - a human drives every turn, so the exporter's token names both
-    # the agent identity and the caller. Minted per turn by app/a365/fmi.py.
+    # A365 auth mode: obo, custom engine. The token comes straight from the Azure Bot
+    # OAuth connection, which is scoped to the observability API - see
+    # app/main.py::_publish_observability_token.
     use_microsoft_opentelemetry(
         enable_a365=True,
         # Both flags are required: enable_a365 only registers the span processors.
@@ -102,7 +103,7 @@ def init_observability(settings: Settings) -> bool:
 
     logger.info(
         "A365 observability wired for agent %s (exporter %s).",
-        settings.a365_agent_id,
+        settings.observability_agent_id,
         "enabled" if settings.enable_a365_observability_exporter else "disabled",
     )
     _initialized = True
@@ -111,7 +112,10 @@ def init_observability(settings: Settings) -> bool:
 
 def build_agent_details(settings: Settings) -> AgentDetails:
     return AgentDetails(
-        agent_id=settings.a365_agent_id,
+        # The exporter reads this back off the span as gen_ai.agent.id and builds the
+        # export URL from it, so for a custom engine agent it must be the app
+        # registration's client id. See Settings.observability_agent_id.
+        agent_id=settings.observability_agent_id,
         agent_name=settings.a365_agent_name or "Microsoft Learn agent",
         agent_description=settings.a365_agent_description
         or "Microsoft Learn research agent",
@@ -141,7 +145,11 @@ def build_baggage_scope(settings: Settings, user: dict[str, str], conversation_i
     return (
         BaggageBuilder()
         .tenant_id(settings.a365_tenant_id)
-        .agent_id(settings.a365_agent_id)
+        # Must match build_agent_details: auto-instrumented spans (LangChain, the LLM
+        # call) take their gen_ai.agent.id from baggage rather than from the invoke
+        # scope, and the exporter partitions on that attribute. If the two disagree the
+        # turn splits into two identity groups and only one of them has a token.
+        .agent_id(settings.observability_agent_id)
         .agent_name(settings.a365_agent_name or "Microsoft Learn agent")
         .agent_blueprint_id(settings.a365_blueprint_id)
         .conversation_id(conversation_id)

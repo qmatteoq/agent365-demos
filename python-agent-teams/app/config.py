@@ -49,10 +49,9 @@ class Settings(BaseSettings):
     a365_observability_log_level: str = "warn|error"
 
     # -- Bot channel app ----------------------------------------------------------
-    # The Agents SDK reads these from the environment itself; they are mirrored into
-    # this model because hop 1 of the observability token chain needs them too.
+    # The Agents SDK reads these from the environment itself; the client id is mirrored
+    # into this model because it *is* the observability agent id (see below).
     connections__service_connection__settings__clientid: str = ""
-    connections__service_connection__settings__clientsecret: str = ""
 
     # Short aliases: the stamped names are unwieldy at every call site.
     @property
@@ -73,41 +72,50 @@ class Settings(BaseSettings):
 
     @property
     def a365_blueprint_id(self) -> str:
-        # The blueprint is both the observability client and hop 2 of the token chain,
-        # so the CLI writes the same GUID to two keys. Prefer the explicit one.
+        # Recorded for the record and for the README; the observability path does not
+        # use it. The blueprint is the agentic parent, and a custom engine agent never
+        # authenticates through it.
         return (
             self.agent365observability__agentblueprintid
             or self.agent365observability__clientid
         )
 
     @property
-    def a365_blueprint_secret(self) -> str:
-        return self.agent365observability__clientsecret
-
-    @property
     def bot_client_id(self) -> str:
-        """The bot channel app, which performs hop 1 of the observability token chain.
+        """The bot channel app registration -- and the observability agent id.
 
-        Read from the Agents SDK's own connection settings rather than duplicated: the
-        OBO exchange has to be done by the same app the Azure Bot OAuth connection is
-        registered to, so a second copy of this value could only ever drift.
+        Read from the Agents SDK's own connection settings rather than duplicated, so
+        the two can never drift apart.
         """
         return self.connections__service_connection__settings__clientid
 
     @property
-    def bot_client_secret(self) -> str:
-        return self.connections__service_connection__settings__clientsecret
+    def observability_agent_id(self) -> str:
+        """The id the exporter puts in the export URL and in ``gen_ai.agent.id``.
+
+        For a *custom engine* agent this is the app registration's client id, not the
+        Agent 365 agent identity. The exporter reads ``gen_ai.agent.id`` off the span,
+        uses it to build
+
+            POST /observability/tenants/{tenant}/otlp/agents/{agentId}/traces
+
+        and looks the token up under the same value, so this id, the token's ``azp`` and
+        the token store key are all one and the same. A mismatch is HTTP 403.
+
+        The Agent 365 agent identity in ``a365_agent_id`` is deliberately *not* used
+        here: a custom engine agent's turns carry no agentic identity, so it has no
+        credential with which to make itself the ``azp``.
+
+        https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup
+        """
+        return self.bot_client_id
 
     @property
     def a365_configured(self) -> bool:
-        """True when every value the observability token chain needs is present."""
+        """True when every value the observability path needs is present."""
         return bool(
-            self.a365_agent_id
-            and self.a365_tenant_id
-            and self.a365_blueprint_id
-            and self.a365_blueprint_secret
+            self.a365_tenant_id
             and self.bot_client_id
-            and self.bot_client_secret
         )
 
 
