@@ -9,16 +9,23 @@ namespace LearnTeamsAgent.Observability;
 /// Acquires the Agent 365 Observability API token used by the span exporter.
 ///
 /// The observability backend binds the caller to the agent being written to: the token's
-/// principal has to be the agent identity that appears in the export route. A delegated
-/// on-behalf-of token cannot satisfy that, because its principal is the signed-in human, so
-/// the backend answers 403. The token therefore has to be minted service-to-service, through
-/// the federated identity chain, which yields a token whose subject is the agent:
+/// principal has to be the agent identity that appears in the export route. A *plain* delegated
+/// user token cannot satisfy that, because its principal is the signed-in human, so the backend
+/// answers 403. This service mints the token service-to-service instead, through the federated
+/// identity chain, which yields a token whose subject is the agent:
 ///
 ///   Hop 1+2  blueprint credentials + FmiPath(agentId)  ->  assertion for the agent identity
 ///   Hop 3    agent identity presents that assertion     ->  Observability API token
 ///
 /// The resulting token carries the Agent365.Observability.OtelWrite role and an azp/oid equal
 /// to the agent id, which is what the export route expects.
+///
+/// NOTE: the S2S shape is under review for this agent. An earlier comment justified it by
+/// claiming a Teams agent has no user assertion to exchange - that is false here, since hop 1 of
+/// WorkIqTokenService exchanges the user's Teams SSO token on every turn. The agent-OBO chain
+/// (AddAgenticTracingExporter, no UseS2SEndpoint) also ends at the agent identity and would be
+/// accepted too; it represents the agent acting *for* the user rather than alone. Attribution is
+/// not the deciding factor either way - caller identity travels in baggage, not in this token.
 ///
 /// <c>Agent365Observability:UseManagedIdentity</c> picks how the blueprint authenticates:
 /// managed identity when hosted on Azure, a client secret when running locally. Managed

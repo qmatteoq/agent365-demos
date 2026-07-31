@@ -14,8 +14,8 @@ It is onboarded to Agent 365 as a **system agent** with observability exported
 **service-to-service**. The AI Teammate variant of the same agent is
 [`dotnet-agent-teammate`](../dotnet-agent-teammate); comparing the two is the point of having both.
 
-| | |
-|---|---|
+|  |  |
+| --- | --- |
 | Language | .NET 10 |
 | Agent framework | Microsoft Agent Framework (`Microsoft.Agents.AI.OpenAI`) |
 | Hosting | Microsoft 365 Agents SDK (`Microsoft.Agents.Hosting.AspNetCore`) |
@@ -26,7 +26,7 @@ It is onboarded to Agent 365 as a **system agent** with observability exported
 
 ## How it fits together
 
-```
+```text
 Teams / M365 Copilot
         │  Bot Framework activity (JWT signed)
         ▼
@@ -201,19 +201,43 @@ Wired in `Program.cs` and `Observability/`:
 2. **Agent identity** authenticates with that assertion as its client credential, scope
    `api://9b975845-388f-4429-889e-eab1ef63949c/.default` → the Observability API token.
 
-A Teams agent has no interactive sign-in and therefore no user assertion to exchange, which is what
-forces this shape. A delegated user token is rejected outright, because its principal is the human
-rather than the agent.
+A delegated *user* token is rejected outright by the export route, because its principal is the
+human rather than the agent — so whatever the chain looks like, it has to end at the agent identity.
+
+> ⚠️ **This agent's use of the S2S shape is under review, and the reason previously given for it was
+> wrong.** The claim was that "a Teams agent has no interactive sign-in and therefore no user
+> assertion to exchange". That is false here: hop 1 of this agent's own WorkIQ chain exchanges the
+> user's Teams SSO token every turn, so a user assertion *is* available and the OBO shape
+> (`AddAgenticTracingExporter`, no `UseS2SEndpoint`) was possible. Microsoft's own guidance picks the
+> auth mode on whether a user is in the loop at runtime — for a Teams agent, that means OBO. Note
+> also that `a365.config.json` records no `--authmode`, so the *registration* used the default
+> delegated grants; only the exporter is S2S. Attribution is not the reason to switch: caller
+> identity travels in baggage and survives the S2S route (see the instrumentation note above).
 
 Per turn, in `Agent/LearnAgent.cs`:
 
-- A **`BaggageBuilder`** scope carries tenant, agent id and conversation id. Spans emitted outside
-  one are dropped as *"Partitioned into 0 identity groups"*.
-- An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`.
+- A **`BaggageBuilder`** scope flows identity onto every child span. Spans emitted outside one are
+  dropped as *"Partitioned into 0 identity groups"*. It starts with
+  **`.FromTurnContext(turnContext)`**, which adds `user.id` and `user.name` off `Activity.From`
+  plus `microsoft.channel.name` — the last of which `BaggageBuilder`'s own documentation lists as a
+  certification requirement alongside the tenant and conversation ids. The explicit
+  `.TenantId()` / `.AgentId()` / `.ConversationId()` calls come **after** it deliberately:
+  `FromTurnContext` also writes `gen_ai.agent.id` from `Recipient.AgenticAppId`, which is null on a
+  non-agentic Teams turn, and the builder keeps one dictionary where the last write per key wins.
+- An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`, and
+  is given `CallerDetails` so the parent span names the human as well.
 - **No manual `InferenceScope` or `ExecuteToolScope`.** The chat client is wrapped with
   `.UseFunctionInvocation()` and `.UseOpenTelemetry()`, which emits the `gen_ai` inference and tool
   spans as children automatically. Without that wrapping the agent answers but Defender shows a
   hollow parent span.
+
+> **The export token does not carry the caller — baggage does.** It is tempting to assume the S2S
+> route loses user attribution because its token belongs to the agent rather than a person. It does
+> not. `AddServiceTracingExporter` and `AddAgenticTracingExporter` differ only in which token cache
+> they use and in `UseS2SEndpoint`; the payload is built identically. Verified on a live turn: the
+> `invoke_agent` span and its `execute_tool` children all carried `user.id` and `user.name`, and
+> `POST /observabilityService/.../traces` returned **200**. Whether the portal *renders* that user
+> for an S2S export is a separate question that only the portal can answer.
 
 ### How WorkIQ is wired
 
@@ -265,6 +289,9 @@ Tools are resolved **per turn**, not at startup, because each one is called with
 for the current user — so the agent can only reach mail, calendar and Teams content that user could
 open themselves.
 
+Verified working on a live Teams turn: all three servers connect and expose 74 tools between them
+(mail 22, calendar 16, Teams 36).
+
 > Sign-in is attached to the message route only, not globally. `AutoSignIn` fires on every activity
 > including the `conversationUpdate` raised at install time, which surfaces a sign-in prompt before
 > the user has asked anything. Teams SSO failures are otherwise silent and show up only as missing
@@ -279,3 +306,4 @@ open themselves.
   package; it is a sample-local `AspNetExtensions.cs` you copy in.
   `dotnet-agent-teammate` has the same gap.
 - The bot app secret for `0cf93255-…` has been exposed and still wants rotating.
+````
