@@ -207,7 +207,15 @@ The AI Teammate manifest has **no `bots` array and no `copilotAgents.customEngin
 > Its turns *do* carry agentic identity — `botMsaAppId` equals the blueprint id, so the platform
 > invokes it as the agentic app — which is exactly the criterion the docs select on, and why the
 > built-in `AgenticTokenCache` is the right choice here and the wrong one for the two Teams-hosted
-> **custom engine** agents. See the
+> **custom engine** agents.
+>
+> This is the *only* agent in the repo that is "Agent 365-enabled" in the doc's sense. All five are
+> registered with Agent 365 and hold blueprints; the term refers to how the turn arrives, not to
+> registration. What puts this one on the other side of the line is its **agent type** — the
+> [get-started guide](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
+> states that *"AI teammate for Microsoft 365 custom engine agents requires an agent identity
+> blueprint"*, and that is exactly the upgrade this folder demonstrates over `dotnet-agent-teams`.
+> See the
 > [root README](../README.md#how-these-map-onto-microsofts-four-documented-scenarios).
 
 Wired in `Program.cs` and `Agent/LearnAgent.cs`:

@@ -41,7 +41,8 @@ having both.
 | `a365/python-agent-teams` | `python-agent-teams`, after onboarding (merged into `main`) |
 | `plain/dotnet-agent-teammate` | `dotnet-agent-teammate`, before onboarding |
 | `a365/dotnet-agent-teammate` | `dotnet-agent-teammate`, after onboarding (merged into `main`) |
-| `s2s/teams-agents` | Both Teams agents while they still exported **service-to-service**, kept as a reference for that shape. See [below](#three-ways-to-authenticate-the-observability-exporter) for why they moved to on-behalf-of. |
+| `s2s/teams-agents` | Both Teams agents while they still exported **service-to-service** (a background loop holding a client-credentials token), kept as a reference for that shape. See [below](#three-ways-to-authenticate-the-observability-exporter) for why they moved to on-behalf-of. |
+| `obo/fmi-agent-identity` | Both Teams agents on the **hand-rolled three-hop FMI chain** — delegated, but forcing the token's `azp` to the A365 agent identity so the export route could carry it. Worked, but is not the documented path. Kept because it is the only build in the repo that exports a *custom engine* agent under its agent identity. |
 
 > The two Teams agents' `plain/` and `a365/` branches are named `plain/teams-agent` and
 > `a365/teams-agent` for the .NET one — a leftover from before the folder was renamed.
@@ -203,7 +204,7 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 
 | Agent | Documented scenario | Export id | Reported in MAC as |
 |---|---|---|---|
-| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache`, no custom resolver | agentic instance id from the activity | its agentic user |
+| `dotnet-agent-teammate` | **Agent 365-enabled using OBO** — built-in `AgenticTokenCache` (the doc says "no custom resolver needed"; in .NET this still needs a thin one, see below) | agentic instance id from the activity | its agentic user |
 | `dotnet-agent-teams` | **Custom engine using OBO** — Azure Bot OAuth connection scoped to the observability API | bot app client id | **the agent identity** (service resolves it) |
 | `python-agent-teams` | **Custom engine using OBO** | bot app client id | **the agent identity** (service resolves it) |
 | `dotnet-agent-no-teams` | *none of the four exactly* — see below | A365 agent identity | not yet observed |
@@ -224,6 +225,14 @@ define four scenarios, selected on two questions: does the turn carry **agentic 
 > Both use the resource's `/.default` scope rather than the named `Agent365.Observability.OtelWrite`
 > the Teams agents use. On a delegated grant `/.default` resolves to whatever has been consented for
 > that resource, which here is that one scope — so the resulting token carries the same claim.
+
+> **One documentation defect worth knowing before you copy scenario 1.** It says the built-in
+> `AgenticTokenCache` means "no custom `TokenResolver` needed". In `Microsoft.OpenTelemetry` 1.0.7
+> for .NET that is not true: `UseMicrosoftOpenTelemetry` does **not** register
+> `IExporterTokenCache<AgenticTokenStruct>` itself, and without registering it manually **the host
+> fails to start**. `dotnet-agent-teammate` therefore creates the cache up front and wires a thin
+> resolver that reads from it. It is still scenario 1 — the built-in cache does the token work — but
+> the wiring is not as free as the page implies.
 
 > ⚠️ **The two Teams-hosted system agents are *custom engine agents*, and that classification is
 > the whole story.** Microsoft's guidance selects the scenario on one testable criterion: whether
@@ -310,9 +319,12 @@ diverge:
   you down the three-hop route.
 
 The diagnosis of the 403 was right and matches the docs verbatim; the FMI *workaround* was the
-mistake. The chain is preserved on the **`s2s/teams-agents`** branch, and remains correct for
-genuinely Agent 365-enabled agents. `dotnet-agent-teams` still uses it for **WorkIQ**, which does
-need it.
+mistake. The chain is preserved on the **`obo/fmi-agent-identity`** branch — *not* `s2s/teams-agents`,
+which holds the earlier client-credentials build and is a different shape entirely. It is **not** the
+right answer for genuinely Agent 365-enabled agents either: those use the distro's built-in
+`AgenticTokenCache`, as `dotnet-agent-teammate` does. Its one remaining virtue is that it is the only
+build here that exports a custom engine agent under its agent identity, which is what made the MAC
+comparison possible. `dotnet-agent-teams` still uses the chain for **WorkIQ**, which does need it.
 
 </details>
 

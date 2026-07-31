@@ -224,6 +224,20 @@ connection left on the default `api://botid-…/defaultScopes` produces **401 In
 > and the docs are explicit: *the `agentId` in the token cache must match the app registration's
 > Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
 >
+> **"Agent 365-enabled" in that doc does not mean "registered with Agent 365".** This agent is
+> registered, holds a blueprint and an agent identity, and appears in the admin center — and is still
+> *not* "Agent 365-enabled" in the doc's sense, which is purely about how the turn arrives (the
+> evidence line above). The
+> [get-started guide](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
+> confirms this is by design: registration may be based on *"your existing Microsoft Entra
+> application registration **or** a blueprint"*, and *"Microsoft 365 custom engine agents are already
+> discoverable today using their existing Microsoft Entra application registration."* So for this
+> agent type the app registration **is** the identity the platform knows it by — exporting under it is
+> the registration identity, not a workaround. The same page names the upgrade that changes this:
+> *"AI teammate for Microsoft 365 custom engine agents requires an agent identity blueprint"* — see
+> [`dotnet-agent-teammate`](../dotnet-agent-teammate) for one. Running under its own identity is an
+> agent **type** change, not an instrumentation change.
+>
 > The export route authorises on the token's `azp`, and it must equal the agent id in the URL.
 > Probed live with a single token and a zero-length protobuf body (a valid empty OTLP request),
 > varying only the agent id:
@@ -265,7 +279,8 @@ itself. It is fetched in the message handler, while the turn is still live, and 
    agent identity), built to force `azp` to the agent identity so the route could carry it. It
    worked and returned 200, but it is not the documented path for this scenario and needed the
    blueprint secret at runtime. It was written because `instrument-observability` has no
-   custom-engine branch; see the root README. (For the record, MSAL Python 1.37 does support
+   custom-engine branch; see the root README. Preserved on the **`obo/fmi-agent-identity`** branch.
+   (For the record, MSAL Python 1.37 does support
    `fmi_path` on `acquire_token_for_client` natively — the sibling `python-agent-no-teams` README
    claims otherwise and is wrong.)
 

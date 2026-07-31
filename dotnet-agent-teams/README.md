@@ -231,6 +231,19 @@ az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
 > and the docs are explicit: *the `agentId` in the token cache must match the app registration's
 > Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
 >
+> **"Agent 365-enabled" in that doc does not mean "registered with Agent 365".** This agent is
+> registered, holds a blueprint and an agent identity, and appears in the admin center — and is still
+> *not* "Agent 365-enabled" in the doc's sense, which is purely about how the turn arrives. The
+> [get-started guide](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
+> confirms this is by design: registration may be based on *"your existing Microsoft Entra
+> application registration **or** a blueprint"*, and *"Microsoft 365 custom engine agents are already
+> discoverable today using their existing Microsoft Entra application registration."* So for this
+> agent type the app registration **is** the identity the platform knows it by — exporting under it is
+> the registration identity, not a workaround. The same page names the upgrade that changes this:
+> *"AI teammate for Microsoft 365 custom engine agents requires an agent identity blueprint"* — which
+> is [`dotnet-agent-teammate`](../dotnet-agent-teammate). Running under its own identity is an agent
+> **type** change, not an instrumentation change.
+>
 > The export route authorises on the token's `azp`, and it must equal the agent id in the URL.
 > Verified by probing the live endpoint with a single token against three ids, identical in every
 > other respect:
@@ -277,8 +290,8 @@ az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
    200, but it is not the documented path for this scenario and it required the blueprint's client
    secret at runtime. It was written because `instrument-observability` has no custom-engine branch
    and `a365-code-validator` prescribes that chain from a rule that is specific to **S2S**. See the
-   root README for that write-up. `Agent365/WorkIqTokenService.cs` still implements the chain,
-   because WorkIQ genuinely needs it.
+   root README for that write-up. Preserved on the **`obo/fmi-agent-identity`** branch.
+   `Agent365/WorkIqTokenService.cs` still implements the chain, because WorkIQ genuinely needs it.
 
 
 Per turn, in `Agent/LearnAgent.cs`:
