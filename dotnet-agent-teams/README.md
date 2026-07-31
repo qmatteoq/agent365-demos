@@ -1,18 +1,15 @@
 # Microsoft Learn agent — .NET, Agent Framework, Teams
 
 A research agent for the Microsoft ecosystem, grounded in the official
-[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp). It answers questions about
-Azure, Microsoft 365, Power Platform, .NET, Entra, Copilot and Dynamics 365, and cites the
+[Microsoft Learn MCP server](https://learn.microsoft.com/training/support/mcp). It answers questions
+about Azure, Microsoft 365, Power Platform, .NET, Entra, Copilot and Dynamics 365, and cites the
 documentation it used.
 
-This is the second agent in this repo. Same agent core as
-[`dotnet-agent-no-teams`](../dotnet-agent-no-teams), but hosted in **Microsoft Teams and Microsoft
-365 Copilot** through the **Microsoft 365 Agents SDK** instead of a Blazor app — the .NET
-counterpart of [`python-agent-teams`](../python-agent-teams).
-
-It is onboarded to Agent 365 as a **system agent**, with observability exported
-**on-behalf-of the signed-in user**. The AI Teammate variant of the same agent is
-[`dotnet-agent-teammate`](../dotnet-agent-teammate); comparing the two is the point of having both.
+Hosted in **Microsoft Teams and Microsoft 365 Copilot** through the **Microsoft 365 Agents SDK**, and
+onboarded to Agent 365 as a **custom engine agent** exporting observability **on behalf of the
+signed-in user**. The AI Teammate variant of the same agent is
+[`dotnet-agent-teammate`](../dotnet-agent-teammate); comparing the two shows what the AI Teammate
+shape changes.
 
 |  |  |
 | --- | --- |
@@ -21,7 +18,7 @@ It is onboarded to Agent 365 as a **system agent**, with observability exported
 | Hosting | Microsoft 365 Agents SDK (`Microsoft.Agents.Hosting.AspNetCore`) |
 | Surface | Teams, Microsoft 365 Copilot |
 | Model | Azure OpenAI (`gpt-4.1`) |
-| Tools | Microsoft Learn MCP + WorkIQ Mail, Calendar and Teams |
+| Tools | Microsoft Learn MCP + Work IQ Mail, Calendar and Teams |
 | Port | 3978 |
 
 ## How it fits together
@@ -38,20 +35,55 @@ ASP.NET Core host ──► LearnAgent : AgentApplication   Agent/LearnAgent.cs
                      AIAgent (Agent Framework)        Program.cs
                             ├──► Azure OpenAI  gpt-4.1
                             ├──► Microsoft Learn MCP        (3 tools)
-                            └──► WorkIQ Mail/Calendar/Teams  Agent365/WorkIqToolProvider.cs
+                            └──► Work IQ Mail/Calendar/Teams  Agent365/WorkIqToolProvider.cs
 ```
 
 `Agent/ConversationSessionStore.cs` keeps one `AgentSession` per conversation, so chats are
 multi-turn. Memory is in-process, so restarting the agent clears every conversation.
+
+## Identities
+
+Three applications are involved, and conflating them is the fastest way to break this agent.
+
+| Identity | Placeholder | Job |
+| --- | --- | --- |
+| Bot channel app | `<bot-app-client-id>` | Validates the inbound Teams token, signs outbound replies, is the principal of the observability token, and is hop 1 of the Work IQ token chain |
+| Blueprint | `<blueprint-id>` | Hop 2 of the Work IQ chain — proving it owns the agent identity |
+| Agent identity | `<agent-identity-id>` | The principal the Work IQ token finally belongs to |
+
+**The bot channel app must be a plain single-tenant Entra app, not a blueprint.** Entra bars agentic
+applications from requesting client-credentials tokens (`AADSTS82001`), so a blueprint cannot sign
+outbound Bot Framework replies at all. It is also the wrong audience: inbound Bot Framework tokens
+carry `aud = <bot-app-client-id>`, so pointing token validation at the blueprint rejects every
+request.
+
+> **After running `a365 setup all`, restore the bot channel credentials.** The CLI overwrites them
+> with the blueprint's and replaces the bot secret in place, so the original is unrecoverable — reset
+> it with `az ad app credential reset --id <bot-app-client-id>` and put the bot app's own client id
+> and secret back into `Connections:BotConnection`. This fails silently: the running process keeps
+> the old values in memory, so it only breaks on the next restart.
+
+## Configuration
+
+| Setting | Purpose |
+| --- | --- |
+| `AzureOpenAI:Endpoint` / `Deployment` / `TenantId` | The model the agent reasons with |
+| `LearnMcp:Endpoint` | Microsoft Learn MCP server |
+| `Connections:BotConnection` | Bot channel app — channel auth, the observability token's client, and hop 1 of the Work IQ chain |
+| `Connections:ServiceConnection` | The blueprint, as written by `a365 setup all`. `ConnectionsMap` routes all traffic to `BotConnection`, and the Work IQ chain reads its blueprint credentials from `Agent365Observability:*`, so nothing in this agent's own code uses it |
+| `Agent365Observability:*` | Agent id, blueprint id and blueprint secret, used by the Work IQ token chain |
+
+**No secret belongs in `appsettings.json`.** Use `dotnet user-secrets`.
 
 ## Running it
 
 ### Prerequisites
 
 - .NET 10 SDK
-- The **Cognitive Services OpenAI User** role on the Azure OpenAI resource (`az login` is enough —
-  no API key anywhere)
+- The **Cognitive Services OpenAI User** role on the Azure OpenAI resource (`az login` is enough — no
+  API key anywhere)
 - `devtunnel`
+- Your own Agent 365 registration (see [Agent 365](#agent-365) below)
 - Two secrets in user secrets:
 
   ```powershell
@@ -70,34 +102,30 @@ dev tunnel up (waiting for `Ready to accept connections for tunnel:`), then laun
 By hand:
 
 ```powershell
-az login --tenant 57db880c-370a-428d-9139-2b346b4eb220
-devtunnel host dotnet-agent-teams-tunnel   # separate terminal
+az login --tenant <tenant-id>
+devtunnel host <tunnel-name>   # separate terminal
 dotnet run
 ```
 
 `GET /` returns a liveness string; the channel endpoint is `POST /api/messages`.
 
-**Port 3978.** `python-agent-teams` uses 3979 and `dotnet-agent-teammate` uses 3980, so all three
-can run at once.
+**Port 3978.** `python-agent-teams` uses 3979 and `dotnet-agent-teammate` uses 3980, so all three can
+run at once.
 
 ### The dev tunnel
 
 Teams cannot reach `localhost`, so the agent is exposed through a **named** dev tunnel. Named
-matters: it keeps the same public url across restarts, and that url is registered as the Azure
-Bot's messaging endpoint. An anonymous tunnel would issue a new url per run and silently break the
-channel. The url is not derived from the tunnel name and is only printed while hosting — read it,
-do not guess it.
-
-It already exists in this environment. On a new machine, create it once:
+matters: it keeps the same public url across restarts, and that url is registered as the Azure Bot's
+messaging endpoint. An anonymous tunnel would issue a new url per run and silently break the channel.
 
 ```powershell
-devtunnel create dotnet-agent-teams-tunnel --allow-anonymous
-devtunnel port create dotnet-agent-teams-tunnel --port-number 3978
-devtunnel show dotnet-agent-teams-tunnel
+devtunnel create <tunnel-name> --allow-anonymous
+devtunnel port create <tunnel-name> --port-number 3978
+devtunnel show <tunnel-name>
 ```
 
-If the url differs from the one on the Azure Bot, update the bot's messaging endpoint to
-`<url>/api/messages`.
+The url is not derived from the tunnel name — `devtunnel show` prints the real one. Set the Azure
+Bot's messaging endpoint to `<url>/api/messages`.
 
 ### Testing it
 
@@ -108,9 +136,8 @@ zipped by hand. Build the package first:
 ./build-app-package.ps1        # writes appPackage.zip
 ```
 
-Then sideload `appPackage.zip` in Teams (**Apps → Manage your apps → Upload an app**). The bot id
-defaults to the bot channel app and the Teams app id is fixed, so repeat uploads update the same app
-instead of creating a new one.
+Then sideload `appPackage.zip` in Teams (**Apps → Manage your apps → Upload an app**). Because the
+bot id and Teams app id are fixed, repeat uploads update the same app instead of creating a new one.
 
 Or skip Teams entirely and use the Microsoft 365 Agents Playground:
 
@@ -119,287 +146,184 @@ npm install -g @microsoft/teams-app-test-tool
 teamsapptester
 ```
 
-The Playground connects to `http://127.0.0.1:3978/api/messages`. Note that WorkIQ tools will not
-resolve there — they need a real Teams SSO token to exchange.
+The Playground connects to `http://127.0.0.1:3978/api/messages`. Work IQ tools will not resolve
+there — they need a real Teams SSO token to exchange.
 
-Because the manifest declares `copilotAgents.customEngineAgents` and includes `copilot` in the
-bot's scopes, the same package also surfaces the agent inside Microsoft 365 Copilot.
-
-## Identities
-
-Three applications are involved, and conflating them is the fastest way to break this agent:
-
-| Identity | App id | Job |
-|---|---|---|
-| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` | Validates the inbound Teams token, signs outbound replies, is the principal of the observability token, and is hop 1 of the WorkIQ token chain |
-| Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` | Hop 2 of both chains — proving it owns the agent identity |
-| Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` | The principal every outbound A365 token finally belongs to |
-
-The bot channel app is a plain single-tenant Entra app, **not** a blueprint. Entra bars agentic
-applications from client-credentials tokens (**`AADSTS82001`**), so a blueprint cannot sign
-outbound Bot Framework replies at all. It is also the wrong audience: inbound Bot Framework tokens
-carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects every request.
-
-> ⚠️ **`a365 setup all` overwrites the bot channel credentials with the blueprint's** and replaces
-> the bot secret in place, so the original is unrecoverable. Reset it with
-> `az ad app credential reset --id 0cf93255-…` and restore the connection settings afterwards. It
-> breaks silently: the running process keeps the old values in memory, so it only fails on the next
-> restart.
-
-## Configuration
-
-| Setting | Purpose |
-|---|---|
-| `AzureOpenAI:Endpoint` / `Deployment` / `TenantId` | The model the agent reasons with |
-| `LearnMcp:Endpoint` | Microsoft Learn MCP server |
-| `Connections:BotConnection` | Bot channel app — channel auth, the observability token's client, and hop 1 of the WorkIQ chain |
-| `Connections:ServiceConnection` | The blueprint, as written by `a365 setup all`. `ConnectionsMap` routes all traffic to `BotConnection`, and both token chains read their blueprint credentials from `Agent365Observability:*`, so nothing in this agent's own code uses it. It is referenced by the `agentic` auth handler, which this agent does not use — see `dotnet-agent-teammate` for one that does. |
-| `Agent365Observability:*` | Identity and credentials for both token chains — the agent id, the blueprint id and the blueprint secret |
-
-**No secret belongs in `appsettings.json`.** Use `dotnet user-secrets`.
+Because the manifest declares `copilotAgents.customEngineAgents` and includes `copilot` in the bot's
+scopes, the same package also surfaces the agent inside Microsoft 365 Copilot.
 
 ## Agent 365
 
-| | |
-|---|---|
-| Auth mode | `obo` (on-behalf-of, delegated) |
-| Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` |
-| Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` |
-| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` |
+### Registering it
 
-When hunting traces in Defender, look for **`dotnet-agent-teams Identity`** — the Agent 365 agent
-identity's display name. That is how they are attributed, *even though* the export route carries the
-bot channel app id: the service resolves the bot app id back to the registered agent. Confirmed in
-MAC — the rows carry `TargetAgentId` = `0cf93255-…` (bot app) and `TargetAgentBlueprintId` =
-`f56c2c54-…` (blueprint). The id in the route is a routing key, not the reported identity.
+From this folder:
+
+```powershell
+a365 setup all --authmode obo
+```
+
+This creates the blueprint and agent identity and grants the Work IQ permissions declared in
+`ToolingManifest.json`. Afterwards, restore the bot channel credentials as described under
+[Identities](#identities).
+
+You also need an **Azure Bot OAuth connection** for observability — see below.
 
 ### How observability is instrumented
+
+This agent is a **custom engine agent**: it is reached through its own bot registration, so its
+activities carry no agentic identity (`Recipient.AgenticAppId` is null). That places it in the
+documented
+[custom engine using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo)
+scenario, where **the export id must be the bot app registration's client id**.
+
+The export route authorises by comparing the token's `azp` against the agent id in the url, and on
+this path the Bot Framework Token Service issues the token to the bot app — so both are the bot app's
+client id, and they agree. Spans therefore carry the bot app id in `gen_ai.agent.id`. That does not
+orphan them: Microsoft Admin Center resolves the route id back to the registered agent and reports
+the traces under the **agent identity's** display name.
 
 Wired in `Program.cs`, `Agent365/` and `Observability/`:
 
 - **`builder.UseMicrosoftOpenTelemetry(...)`** sets `o.Exporters` to
   `ExportTarget.Agent365 | ExportTarget.Console` in Development and `ExportTarget.Agent365` in
   Production — the Agent 365 export is **never** disabled.
-- **`o.Agent365.UseS2SEndpoint` is left at its default (`false`).** The delegated token is accepted
-  by `/observability/`, not the `/observabilityService/` route an S2S token targets. The two routes
-  do not accept each other's tokens.
+- **`o.Agent365.UseS2SEndpoint` stays at its default (`false`).** The delegated token is accepted by
+  `/observability/`, not the `/observabilityService/` route an app-only token targets.
 - **Infrastructure instrumentation is re-enabled explicitly** (`EnableAspNetCoreInstrumentation`,
-  `EnableHttpClientInstrumentation`, `EnableAzureSdkInstrumentation`), because exporting to
-  Agent 365 alone otherwise suppresses it.
-- **The agent id is pinned** to `Connections:BotConnection:Settings:ClientId` — the bot app
-  registration's client id. Left unset, the SDK generates a fresh GUID per agent and the exporter
-  emits orphan identity groups. Why *that* id and not the Agent 365 agent identity is the whole
-  subject of the next section.
+  `EnableHttpClientInstrumentation`, `EnableAzureSdkInstrumentation`), because exporting to Agent 365
+  alone otherwise suppresses it.
+- **The agent id is pinned** to `Connections:BotConnection:Settings:ClientId`. Left unset, the SDK
+  generates a fresh GUID per run and the exporter emits orphan identity groups it cannot
+  authenticate.
 - **`o.Agent365.TokenResolver`** reads from `Agent365/ObservabilityTokenStore.cs`. The exporter
   flushes on a background loop with no turn context, so the token cannot be minted there: each turn
-  deposits one in the store and the resolver reads it back. This is the same store the non-Teams
-  agent uses.
+  deposits one in the store and the resolver reads it back.
 
-**The token chain is a single call.** `Agent/LearnAgent.cs` →
-`PublishObservabilityTokenAsync` calls `UserAuthorization.GetTurnTokenAsync(turnContext,
-"observability")` and deposits the result. That is all — no MSAL, no federated identity chain, no
-blueprint secret. The Bot Framework Token Service performs the on-behalf-of exchange internally,
-against the Azure Bot OAuth connection named by the handler.
+**The token chain is a single call.** `Agent/LearnAgent.cs` → `PublishObservabilityTokenAsync` calls
+`UserAuthorization.GetTurnTokenAsync(turnContext, "observability")` and deposits the result. No MSAL,
+no federated identity chain, no blueprint secret — the Bot Framework Token Service performs the
+on-behalf-of exchange internally, against the Azure Bot OAuth connection named by the handler.
 
 The work is in the **Azure Bot OAuth connection**, not in the code. The agent has two:
 
-| Connection | Scopes | Used for |
-|---|---|---|
-| `BotOAuth` | `api://botid-0cf93255-…/defaultScopes` | WorkIQ — its token is the OBO *assertion*, so its audience must be this app |
-| `oboConnectionProfile` | `api://9b975845-…/Agent365.Observability.OtelWrite` | observability — the token is used directly |
+| Connection | Scope | Used for |
+| --- | --- | --- |
+| `BotOAuth` | `api://botid-<bot-app-client-id>/defaultScopes` | Work IQ — its token is the OBO *assertion*, so its audience must be this app |
+| `oboConnectionProfile` | `api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite` | observability — the token is used directly |
 
-Both share a `tokenExchangeUrl` of `api://botid-0cf93255-…`, which is what keeps Teams SSO silent
-for both: the Teams manifest declares one `webApplicationInfo.resource`, and each connection then
-exchanges that single SSO token for its own configured scope.
+Observability needs a **second** connection rather than a re-scoped `BotOAuth`, because Work IQ uses
+`BotOAuth`'s `api://botid-…` token as its OBO assertion and an assertion must have the exchanging
+client as its audience. Both share a `tokenExchangeUrl` of `api://botid-<bot-app-client-id>`, which
+is what keeps Teams SSO silent for both: the Teams manifest declares one
+`webApplicationInfo.resource`, and each connection exchanges that single SSO token for its own
+configured scope.
+
+Create the observability connection with:
 
 ```bash
-az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
-  -c oboConnectionProfile --client-id <bot app id> --client-secret <bot app secret> \
-  --service AadV2 --provider-scope-string \
-    "api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite" \
-  --parameters tenantID=<tenant> tokenExchangeUrl=api://botid-<bot app id>
+az bot authsetting create \
+  --resource-group <resource-group> \
+  --name <azure-bot-name> \
+  --setting-name oboConnectionProfile \
+  --client-id <bot-app-client-id> \
+  --client-secret <bot-app-secret> \
+  --service "Aadv2" \
+  --parameters clientId="<bot-app-client-id>" clientSecret="<bot-app-secret>" \
+    tenantId="<tenant-id>" tokenExchangeUrl="api://botid-<bot-app-client-id>" \
+  --provider-scope-string \
+    "api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite"
 ```
 
-> ⚠️ **This is a *custom engine agent*, and getting that classification wrong costs an HTTP 403.**
-> Microsoft's observability guidance splits into scenarios on one testable criterion: whether the
-> incoming turn carries **agentic identity** (`agenticAppId` / `agenticUserId`) from the Agent 365
-> platform. This agent is reached through its **own bot app registration** via Teams, so its turns
-> carry none — confirmed at runtime, which is what the once-per-process
-> `Turn identity: isAgenticRequest=False …` log line in `ResolveObservabilityIdentity` exists to
-> record. That makes it a
-> [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo),
-> and the docs are explicit: *the `agentId` in the token cache must match the app registration's
-> Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
->
-> **"Agent 365-enabled" in that doc does not mean "registered with Agent 365".** This agent is
-> registered, holds a blueprint and an agent identity, and appears in the admin center — and is still
-> *not* "Agent 365-enabled" in the doc's sense, which is purely about how the turn arrives. The
-> [get-started guide](https://learn.microsoft.com/microsoft-agent-365/developer/get-started#adding-agent-365-capabilities-incrementally)
-> confirms this is by design: registration may be based on *"your existing Microsoft Entra
-> application registration **or** a blueprint"*, and *"Microsoft 365 custom engine agents are already
-> discoverable today using their existing Microsoft Entra application registration."* So for this
-> agent type the app registration **is** the identity the platform knows it by — exporting under it is
-> the registration identity, not a workaround. The same page names the upgrade that changes this:
-> *"AI teammate for Microsoft 365 custom engine agents requires an agent identity blueprint"* — which
-> is [`dotnet-agent-teammate`](../dotnet-agent-teammate). Running under its own identity is an agent
-> **type** change, not an instrumentation change.
->
-> The export route authorises on the token's `azp`, and it must equal the agent id in the URL.
-> Verified by probing the live endpoint with a single token against three ids, identical in every
-> other respect:
->
-> | agent id in route | result |
-> |---|---|
-> | agent identity `a349a3ca-…` | **403** |
-> | blueprint `f56c2c54-…` | **403** |
-> | bot channel app `0cf93255-…` (the token's `azp`) | **415** — authorised, wrong content type |
->
-> On this path nothing can make the token's `azp` be the Agent 365 agent identity, because the
-> Token Service issues the token to the bot app. So the route carries the bot app's client id and
-> the two agree.
->
-> ✅ **And that does not orphan the traces — confirmed in MAC.** The portal groups and labels them
-> under **`dotnet-agent-teams Identity`** (the agent identity's display name), carrying
-> `TargetAgentId` = `0cf93255-…` and `TargetAgentBlueprintId` = `f56c2c54-…`. The label is the
-> *identity's* name, not the bot app's — which is "dotnet-agent-teams **Bot**" — so the service is
-> resolving past the transport id to the registered agent, not echoing it. The route id is a routing
-> key, not the reported identity, which is why exporting under the bot app is safe for a
-> CLI-registered agent that also holds an agent identity.
->
-> Worth being explicit, because it surprises people: on this path the spans really do carry the
-> **bot app id** in `gen_ai.agent.id`, not the agent identity. The distro reads the span attribute,
-> the URL segment and the token-cache key from one value, so they cannot diverge — and the token can
-> only be issued to the bot app here. The agent identity reappears at the reporting layer.
->
-> **Two traps on the way in.** The distro's `AgenticTokenCache` looks like the OBO answer and the
-> `instrument-observability` skill points at it; it performs a plain on-behalf-of exchange through
-> the bot channel app, so pairing it with an agent-identity route yields **403** — silently, because
-> `GetObservabilityToken` swallows the error and the exporter just logs a failed batch. And an OAuth
-> connection left on the default `api://botid-…/defaultScopes` yields **401 InvalidAudience**, which
-> is why `oboConnectionProfile` exists rather than a re-scoped `BotOAuth`.
-
-**Previous implementations.** Two, in order:
-
-1. **S2S** (`UseS2SEndpoint = true`, a background `ObservabilityTokenService` holding a
-   client-credentials token). Exports returned 200, but the token's principal was the agent alone,
-   with no user in it — the wrong shape for an agent that has a human on every turn. Microsoft's
-   guidance picks the auth mode on whether a user is in the loop at runtime, not on where the agent
-   is hosted. Preserved on the **`s2s/teams-agents`** branch.
-2. **A hand-rolled three-hop FMI chain** (bot app → blueprint with `fmi_path` → agent identity),
-   built to force `azp` to the agent identity so the route could carry it. It worked and returned
-   200, but it is not the documented path for this scenario and it required the blueprint's client
-   secret at runtime. It was written because `instrument-observability` has no custom-engine branch
-   and `a365-code-validator` prescribes that chain from a rule that is specific to **S2S**. See the
-   root README for that write-up. Preserved on the **`obo/fmi-agent-identity`** branch.
-   `Agent365/WorkIqTokenService.cs` still implements the chain, because WorkIQ genuinely needs it.
-
+Leaving the scope at the default `api://botid-<client-id>/defaultScopes` produces
+`401 InvalidAudience`.
 
 Per turn, in `Agent/LearnAgent.cs`:
 
 - A **`BaggageBuilder`** scope flows identity onto every child span. Spans emitted outside one are
   dropped as *"Partitioned into 0 identity groups"*. It starts with
-  **`.FromTurnContext(turnContext)`**, which adds `user.id` and `user.name` off `Activity.From`
-  plus `microsoft.channel.name` — the last of which `BaggageBuilder`'s own documentation lists as a
-  certification requirement alongside the tenant and conversation ids. The explicit
-  `.TenantId()` / `.AgentId()` / `.ConversationId()` calls come **after** it deliberately:
-  `FromTurnContext` also writes `gen_ai.agent.id` from `Recipient.AgenticAppId`, which is null on a
-  non-agentic Teams turn, and the builder keeps one dictionary where the last write per key wins.
-  `.AgentName()`, `.AgentBlueprintId()` and `.SessionId()` are chained too, from configuration —
-  the activity carries none of them. It is easy to think `AgentDetails` on the `InvokeAgentScope`
-  below covers this, since it names the same three; it does not. **`AgentDetails` decorates only
-  the parent span.** Omit them here and every `execute_tool` and `chat` row arrives with a bare
-  agent id and no blueprint — and the blueprint is what groups instances of the same agent
+  **`.FromTurnContext(turnContext)`**, which adds `user.id` and `user.name` off `Activity.From` plus
+  `microsoft.channel.name` — the last of which `BaggageBuilder`'s documentation lists as a
+  certification requirement alongside the tenant and conversation ids. The explicit `.TenantId()` /
+  `.AgentId()` / `.ConversationId()` calls come **after** it deliberately: `FromTurnContext` also
+  writes `gen_ai.agent.id` from `Recipient.AgenticAppId`, which is null on a non-agentic Teams turn,
+  and the builder keeps one dictionary where the last write per key wins. `.AgentName()`,
+  `.AgentBlueprintId()` and `.SessionId()` are chained too, from configuration — the activity carries
+  none of them.
+
+  `AgentDetails` on the `InvokeAgentScope` below names the same three values but **decorates only the
+  parent span**. Omit them from the baggage and every `execute_tool` and `chat` row arrives with a
+  bare agent id and no blueprint — and the blueprint is what groups instances of the same agent
   together in reporting.
-- An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`, and
-  is given `CallerDetails` so the parent span names the human as well.
+- An **`InvokeAgentScope`** wraps the run, with `RecordInputMessages` / `RecordOutputMessages`, and is
+  given `CallerDetails` so the parent span names the human as well.
 - **No manual `InferenceScope` or `ExecuteToolScope`.** The chat client is wrapped with
   `.UseFunctionInvocation()` and `.UseOpenTelemetry()`, which emits the `gen_ai` inference and tool
   spans as children automatically. Without that wrapping the agent answers but Defender shows a
   hollow parent span.
-- **`BaggageBackfillProcessor` (registered in `Program.cs` before the distro) is what gets the
-  inference span exported at all.** The SDK enriches spans from baggage in `OnStart`, and only when
-  the span already carries `gen_ai.operation.name`. Microsoft.Extensions.AI creates its `chat` span
-  with `StartActivity("chat " + model, ActivityKind.Client)` and sets the tags afterwards — verified
-  by decompiling `OpenTelemetryChatClient` — so the enrichment misses it and the exporter drops it
-  with *"1 spans skipped due to missing tenant or agent ID"*, taking the prompt and the completion
-  with it. The processor re-runs the copy at `OnEnd`, when the tag exists. Registration order is
-  load-bearing: `OnEnd` runs in registration order, so it must be added **before**
-  `UseMicrosoftOpenTelemetry` to sit ahead of the export processor. See
-  `dotnet-agent-teammate/README.md` for the full write-up and the before/after measurements.
-  This is a workaround for an SDK timing quirk, not a supported extension point.
+- **`BaggageBackfillProcessor`** (registered in `Program.cs` **before** the distro) is what gets the
+  inference span exported at all. Registration order is load-bearing — `OnEnd` runs in registration
+  order, so it must sit ahead of the export processor. See the
+  [root README](../README.md#emitting-a-span-is-not-the-same-as-exporting-it) for the full
+  explanation.
 
-> **Two different things carry the caller, and it is worth keeping them apart.** The *span payload*
-> carries `user.id` and `user.name` through baggage regardless of auth mode — that was verified on
-> the earlier S2S build, where `invoke_agent` and its `execute_tool` children all named the user and
-> `POST /observabilityService/.../traces` returned **200**. What the S2S build could *not* do is make
-> the **export token** represent the user: its principal was the agent alone. The OBO token used now
-> is issued *for the signed-in user*, so the human is its subject; its `azp` is the bot app, which is
-> why the export route carries that id.
+### How Work IQ is wired
 
-### How WorkIQ is wired
+`ToolingManifest.json` declares `mcp_MailTools`, `mcp_CalendarTools` and `mcp_TeamsServer`, each with
+its own url, audience and scope (`Tools.ListInvoke.All`).
 
-`ToolingManifest.json` declares `mcp_MailTools`, `mcp_CalendarTools` and `mcp_TeamsServer`, each
-with its own url, audience and scope (`Tools.ListInvoke.All`).
-
-**Tool discovery is bypassed because the route is broken service-side.**
-`IMcpToolRegistrationService.GetMcpToolsAsync` first asks the gateway which servers the agent may
-use:
+**Tool discovery is bypassed.** `IMcpToolRegistrationService.GetMcpToolsAsync` first asks the gateway
+which servers the agent may use:
 
 ```text
 GET https://agent365.svc.cloud.microsoft/agents/v2/{agentId}/mcpServers  ->  500
 ```
 
-It returns 500 even for a syntactically valid but non-existent agent id, where a 404 would be
-expected, and other `/agents/v2/` routes are healthy — so the route itself is at fault, not this
-agent. The path is hardcoded in every published version of `Microsoft.Agents.A365.Tooling`, so
-there is no version to pin to.
+That route returns 500 even for a syntactically valid but non-existent agent id, where a 404 would be
+expected, while other `/agents/v2/` routes are healthy — so the route itself is at fault. The path is
+hardcoded in every published version of `Microsoft.Agents.A365.Tooling`, so there is no version to
+pin to.
 
-Discovery turns out to be unnecessary: `ToolingManifest.json` already carries the url, audience and
-scope for every server. `Agent365/WorkIqToolProvider.cs` therefore connects to each one directly
-with `HttpClientTransport` + `McpClient` over streamable HTTP, retrying once on a transport drop
-(the WorkIQ endpoints have been seen dropping TLS mid-handshake) and skipping any server that stays
-unavailable. The SDK services are still registered so the extension stays wired, but nothing routes
-through them.
+Discovery is unnecessary anyway: `ToolingManifest.json` already carries the url, audience and scope
+for every server. `Agent365/WorkIqToolProvider.cs` connects to each one directly with
+`HttpClientTransport` + `McpClient` over streamable HTTP, retrying once on a transport drop and
+skipping any server that stays unavailable, so one bad server costs only its own tools. The SDK
+services are still registered so the extension stays wired, but nothing routes through them. Once the
+gateway is fixed, this can be replaced by `GetMcpToolsAsync` with no other change.
 
-**The token is a three-hop delegated chain** (`Agent365/WorkIqTokenService.cs`, raw HTTP). The
-servers require the delegated `Tools.ListInvoke.All` scope and reject anything else, including an
-app-only token:
+**The token is a three-hop delegated chain** (`Agent365/WorkIqTokenService.cs`, raw HTTP). The servers
+require the delegated `Tools.ListInvoke.All` scope and reject anything else, including an app-only
+token:
 
 ```text
 403  Access denied: Scope 'Tools.ListInvoke.All' is not present in the request.
 ```
 
-1. **Bot channel app** exchanges the user's Teams token for `api://<blueprint>/access_agent_as_user`.
-   Teams SSO issues a token whose audience is the channel app, and the last hop only accepts an
-   assertion issued to the blueprint family.
-2. **Blueprint** + secret + `fmi_path=<agent identity>` → a token-exchange assertion, proving it
+1. **Bot channel app** exchanges the user's Teams token for
+   `api://<blueprint-id>/access_agent_as_user`. Teams SSO issues a token whose audience is the
+   channel app, and the last hop only accepts an assertion issued to the blueprint family.
+2. **Blueprint** + secret + `fmi_path=<agent-identity-id>` → a token-exchange assertion, proving it
    owns that identity.
-3. **Agent identity** performs the final on-behalf-of exchange for `<audience>/.default`,
-   presenting that assertion as its client credential.
+3. **Agent identity** performs the final on-behalf-of exchange for `<audience>/.default`, presenting
+   that assertion as its client credential.
 
-The result belongs to the governed agent identity acting for the user, which is what tool calls
-must be attributed to. The channel app holds the same consented permissions and could satisfy the
-scope check on its own, but that token would not be tied to the agent identity, so it is
-deliberately not used.
+The result belongs to the governed agent identity acting for the user, which is what tool calls must
+be attributed to. The channel app holds the same consented permissions and could satisfy the scope
+check on its own, but that token would not be tied to the agent identity, so it is deliberately not
+used.
 
-Tools are resolved **per turn**, not at startup, because each one is called with a token exchanged
-for the current user — so the agent can only reach mail, calendar and Teams content that user could
-open themselves.
+Tools are resolved **per turn**, not at startup, because each one is called with a token exchanged for
+the current user — so the agent can only reach mail, calendar and Teams content that user could open
+themselves. The three servers expose 74 tools between them (mail 22, calendar 16, Teams 36).
 
-Verified working on a live Teams turn: all three servers connect and expose 74 tools between them
-(mail 22, calendar 16, Teams 36).
-
-> Sign-in is attached to the message route only, not globally. `AutoSignIn` fires on every activity
-> including the `conversationUpdate` raised at install time, which surfaces a sign-in prompt before
-> the user has asked anything. Teams SSO failures are otherwise silent and show up only as missing
-> WorkIQ tools, so the failure handler logs and tells the user.
+> Sign-in is attached to the **message route only**, not globally. `AutoSignIn` fires on every
+> activity including the `conversationUpdate` raised at install time, which would surface a sign-in
+> prompt before the user has asked anything. Teams SSO failures are otherwise silent and show up only
+> as missing Work IQ tools, so the failure handler logs and tells the user.
 
 ## Known gaps
 
-- **`POST /api/messages` accepts unauthenticated activities.** No authentication middleware is
-  wired, so `TokenValidation` in `appsettings.json` is not enforced. The official fix is
-  `AddAgentAspNetAuthentication(builder.Configuration)` plus `UseAuthentication`/`UseAuthorization`
-  and `.RequireAuthorization()` — but that extension method ships in no `Microsoft.Agents.*`
-  package; it is a sample-local `AspNetExtensions.cs` you copy in.
-  `dotnet-agent-teammate` has the same gap.
-- The bot app secret for `0cf93255-…` has been exposed and still wants rotating.
+- **`POST /api/messages` accepts unauthenticated activities.** No authentication middleware is wired,
+  so `TokenValidation` in `appsettings.json` is not enforced. The official fix is
+  `AddAgentAspNetAuthentication(builder.Configuration)` plus `UseAuthentication` / `UseAuthorization`
+  and `.RequireAuthorization()` — but that extension method ships in no `Microsoft.Agents.*` package;
+  it is a sample-local `AspNetExtensions.cs` you copy in. `dotnet-agent-teammate` has the same gap.
