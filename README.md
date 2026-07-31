@@ -190,25 +190,63 @@ depends on whether a human is signed in, and on whether the agent has an identit
 | | Chain | Used by |
 | --- | --- | --- |
 | Web-hosted | On-behalf-of: the user's token is the assertion, so the token represents *the agent acting for the user* | `dotnet-agent-no-teams`, `python-agent-no-teams` |
-| Teams-hosted system agent | On-behalf-of, three hops: bot app re-targets the Teams SSO token to the blueprint, blueprint proves ownership via `fmi_path`, agent identity performs the final exchange | `dotnet-agent-teams`, `python-agent-teams` |
+| Teams-hosted system agent (*custom engine*) | On-behalf-of, one call: the Azure Bot OAuth connection is scoped to the observability API, and the Bot Framework Token Service performs the exchange | `dotnet-agent-teams`, `python-agent-teams` |
 | AI Teammate | Agentic user: the SDK exchanges the turn token for a token belonging to the agent's own Agentic User | `dotnet-agent-teammate` |
 
-> ⚠️ **Both Teams-hosted system agents moved from S2S to OBO, and the export route explains why the
-> obvious OBO wiring fails.** The auth mode is decided by whether a human is in the loop at runtime,
-> not by where the agent is hosted — a Teams agent has a user on every turn, so it belongs on OBO. But
-> the distro's `AgenticTokenCache` does a *plain* on-behalf-of exchange through the bot channel app,
-> and the export route authorises on the token's `azp`: it must equal the agent id in the URL. Probed
-> on the live endpoint with one token against three ids — agent identity **403**, blueprint **403**,
-> bot app **415** (authorised, wrong content type). The working chain therefore ends in an exchange
-> performed *by the agent identity for the user*, giving `azp` = agent identity and the human as
-> subject. See [`dotnet-agent-teams/README.md`](./dotnet-agent-teams/README.md).
+> ⚠️ **The two Teams-hosted system agents are *custom engine agents*, and that classification is
+> the whole story.** Microsoft's guidance selects the scenario on one testable criterion: whether
+> the incoming turn carries **agentic identity** (`agenticAppId` / `agenticUserId`) from the
+> Agent 365 platform. These two are reached through their **own bot app registration** via Teams, so
+> they carry none — directly observed, not inferred (`agentic_app_id=None agentic_user_id=None`).
+> That makes them
+> [custom engine agents using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo),
+> and the docs are explicit: *the `agentId` in the token cache must match the app registration's
+> Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
 >
-> Microsoft documents a **simpler alternative** for this exact scenario — scope the Azure Bot OAuth
-> connection to the observability API and post under the **bot app's client id** instead, with no
-> MSAL chain at all
-> ([custom engine using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo)).
-> Both wirings return 200; these agents use the FMI chain so that every agent in the repo reports
-> under its A365 agent identity. Each agent's README sets out the trade-off.
+> The export route authorises on the token's `azp`, which must equal the agent id in the URL.
+> Probed on the live endpoint with one token against three ids — agent identity **403**, blueprint
+> **403**, bot app **415** (authorised, wrong content type). On this path the Token Service issues
+> the token to the bot app, so the route carries the bot app's client id and the two agree. **Traces
+> for these two agents are therefore filed under the bot app id, not the Agent 365 agent identity.**
+>
+> Two traps on the way in, both of which cost this repo a rebuild:
+> - The distro's **`AgenticTokenCache`** looks like the OBO answer and the `instrument-observability`
+>   skill points at it. It does a plain on-behalf-of exchange through the bot app, so pairing it with
+>   an agent-identity route yields **403** — silently, because the error is swallowed.
+> - An OAuth connection left on the default `api://botid-…/defaultScopes` yields
+>   **401 InvalidAudience**. It must be scoped to `Agent365.Observability.OtelWrite`.
+
+<details>
+<summary>These agents previously used a hand-rolled three-hop FMI chain. Why, and why that was wrong.</summary>
+
+Before the documented path was found, both agents forced the token's `azp` to be the Agent 365
+**agent identity** with a three-hop chain: bot app re-targets the Teams SSO token to the blueprint,
+blueprint proves ownership via `fmi_path`, agent identity performs the final exchange. It worked —
+exports returned 200 — but it needed the blueprint's client secret at runtime and it is not what
+Microsoft documents for this scenario.
+
+It was written by following the Agent 365 skills rather than the documentation, and the two
+diverge:
+
+- `instrument-observability` has **no custom-engine branch at all**. Grepping its three reference
+  docs for `azureBotOAuthConnectionName`, `oboConnectionProfile`, or an OAuth-connection scope of
+  `Agent365.Observability.OtelWrite` returns **zero hits** — the docs' central Azure prerequisite
+  appears nowhere in the skill.
+- It collapses OBO into the agentic path: *"OBO path (`obo` / `agentic-user`) — applies to both AI
+  Teammate agents and Standard .NET agents"*, one branch for two identity models. Its Python sample
+  reads `agent_id = context.activity.recipient.agentic_app_id` and instructs *"resolve dynamically
+  from context each turn (never from config)"* — the exact opposite of the documented rule for a
+  custom engine agent, and `agentic_app_id` is `None` on these turns anyway.
+- `a365-code-validator` treats *"token principal is the app, not the agent identity"* as the cause
+  of a 403 and prescribes the FMI chain. That rule is **specific to S2S**; applied to OBO it sends
+  you down the three-hop route.
+
+The diagnosis of the 403 was right and matches the docs verbatim; the FMI *workaround* was the
+mistake. The chain is preserved on the **`s2s/teams-agents`** branch, and remains correct for
+genuinely Agent 365-enabled agents. `dotnet-agent-teams` still uses it for **WorkIQ**, which does
+need it.
+
+</details>
 
 In the web-hosted case a plain delegated user token is rejected by the export route, because its
 principal is the human rather than the agent.
@@ -235,13 +273,17 @@ They use two different identities, for two different jobs:
 - **The signed-in user**, through On-Behalf-Of, whenever they read that user's data. WorkIQ tools
   run this way so the agent can only see mail, calendar and Teams content the user could open
   themselves.
-- **The agent's own identity**, for writing observability traces. The observability service
-  authorises on the token's `azp`, which must equal the agent id in the export route — a token whose
-  client is the bot channel app answers `403`. The token is therefore minted through the same
-  federated identity chain the WorkIQ tools use
-  ([`Agent365/WorkIqTokenService.cs`](./dotnet-agent-teams/Agent365/WorkIqTokenService.cs)), which
-  ends in an exchange performed by the agent identity *for* the user: `azp` is the agent, the subject
-  is the human.
+- **The bot app**, for writing observability traces. The observability service authorises on the
+  token's `azp`, which must equal the agent id in the export route. On this path the Bot Framework
+  Token Service issues the token to the bot app, so the route carries the bot app's client id. The
+  token is still delegated — the human is its subject — but its client is the app.
+
+Each agent therefore needs an Azure Bot OAuth connection scoped to
+`api://9b975845-…/Agent365.Observability.OtelWrite`, and one `GetTurnTokenAsync` /
+`auth.get_token` call per turn. `dotnet-agent-teams` adds this as a **second** connection
+(`oboConnectionProfile`) rather than re-scoping its existing one, because WorkIQ uses the original
+connection's `api://botid-…` token as its OBO *assertion* — and an assertion must have the
+exchanging client as its audience.
 
 Traces reach the service over the delegated route (`/observability/`). Delegated and
 service-to-service traces use different routes and do not accept each other's tokens, so the token

@@ -131,7 +131,7 @@ Three applications are involved, and conflating them is the fastest way to break
 
 | Identity | App id | Job |
 |---|---|---|
-| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` | Validates the inbound Teams token, signs outbound replies, and is hop 1 of both token chains |
+| Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` | Validates the inbound Teams token, signs outbound replies, is the principal of the observability token, and is hop 1 of the WorkIQ token chain |
 | Blueprint | `f56c2c54-5fb4-4097-a73e-95970ea5b8f7` | Hop 2 of both chains — proving it owns the agent identity |
 | Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` | The principal every outbound A365 token finally belongs to |
 
@@ -152,7 +152,7 @@ carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects
 |---|---|
 | `AzureOpenAI:Endpoint` / `Deployment` / `TenantId` | The model the agent reasons with |
 | `LearnMcp:Endpoint` | Microsoft Learn MCP server |
-| `Connections:BotConnection` | Bot channel app — channel auth, and hop 1 of both token chains |
+| `Connections:BotConnection` | Bot channel app — channel auth, the observability token's client, and hop 1 of the WorkIQ chain |
 | `Connections:ServiceConnection` | The blueprint, as written by `a365 setup all`. `ConnectionsMap` routes all traffic to `BotConnection`, and both token chains read their blueprint credentials from `Agent365Observability:*`, so nothing in this agent's own code uses it. It is referenced by the `agentic` auth handler, which this agent does not use — see `dotnet-agent-teammate` for one that does. |
 | `Agent365Observability:*` | Identity and credentials for both token chains — the agent id, the blueprint id and the blueprint secret |
 
@@ -167,7 +167,9 @@ carry `aud = <bot channel app>`, so pointing validation at the blueprint rejects
 | Agent identity | `a349a3ca-4c84-4165-be0a-8a0e5041b460` |
 | Bot channel app | `0cf93255-7aee-4542-8df9-fc53bb8af150` |
 
-When hunting traces in Defender, filter on the **agent identity**, not the blueprint id.
+When hunting traces in Defender, filter on the **bot channel app id** — that is the id the export
+route carries, for the reasons set out under [How observability is instrumented](#how-observability-is-instrumented).
+The agent identity and blueprint are still the ids Agent 365 registered the agent under.
 
 ### How observability is instrumented
 
@@ -182,37 +184,54 @@ Wired in `Program.cs`, `Agent365/` and `Observability/`:
 - **Infrastructure instrumentation is re-enabled explicitly** (`EnableAspNetCoreInstrumentation`,
   `EnableHttpClientInstrumentation`, `EnableAzureSdkInstrumentation`), because exporting to
   Agent 365 alone otherwise suppresses it.
-- **The agent id is pinned** to `Agent365Observability:AgentId`. Left unset, the SDK generates a
-  fresh GUID per agent and the exporter emits orphan identity groups.
+- **The agent id is pinned** to `Connections:BotConnection:Settings:ClientId` — the bot app
+  registration's client id. Left unset, the SDK generates a fresh GUID per agent and the exporter
+  emits orphan identity groups. Why *that* id and not the Agent 365 agent identity is the whole
+  subject of the next section.
 - **`o.Agent365.TokenResolver`** reads from `Agent365/ObservabilityTokenStore.cs`. The exporter
   flushes on a background loop with no turn context, so the token cannot be minted there: each turn
   deposits one in the store and the resolver reads it back. This is the same store the non-Teams
   agent uses.
 
-**The token chain** (`Agent365/WorkIqTokenService.cs`, `GetTokenForScopeAsync`) — the same three
-hops that mint the WorkIQ tokens, with a different scope:
+**The token chain is a single call.** `Agent/LearnAgent.cs` →
+`PublishObservabilityTokenAsync` calls `UserAuthorization.GetTurnTokenAsync(turnContext,
+"observability")` and deposits the result. That is all — no MSAL, no federated identity chain, no
+blueprint secret. The Bot Framework Token Service performs the on-behalf-of exchange internally,
+against the Azure Bot OAuth connection named by the handler.
 
-1. **Bot channel app** exchanges the user's Teams SSO token for the blueprint's
-   `access_agent_as_user` scope. The Azure Bot OAuth connection issues a token whose audience is the
-   channel app, and the final exchange only accepts an assertion issued to the blueprint family.
-2. **Blueprint** + secret, `fmi_path=<agent identity>`, scope `api://AzureADTokenExchange/.default`
-   → a token-exchange assertion proving it owns the agent identity.
-3. **Agent identity** performs the on-behalf-of exchange for
-   `api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite`, presenting that
-   assertion as its client credential.
+The work is in the **Azure Bot OAuth connection**, not in the code. The agent has two:
 
-The result is a token whose `azp` is the **agent identity** and whose subject is the **human user** —
-which is what makes this path work at all.
+| Connection | Scopes | Used for |
+|---|---|---|
+| `BotOAuth` | `api://botid-0cf93255-…/defaultScopes` | WorkIQ — its token is the OBO *assertion*, so its audience must be this app |
+| `oboConnectionProfile` | `api://9b975845-…/Agent365.Observability.OtelWrite` | observability — the token is used directly |
 
-> ⚠️ **The export route authorises on `azp`, and this is the trap.** The distro ships
-> `AgenticTokenCache` / `AgenticTokenStruct` for the OBO path, and the skill documentation points at
-> it. It does not work for a Teams agent: it performs a *plain* on-behalf-of exchange through the bot
-> channel app, so the token comes back with `azp` = the bot app and every export fails with
-> **HTTP 403** — silently, because `GetObservabilityToken` swallows the error and the exporter just
-> logs a failed batch.
+Both share a `tokenExchangeUrl` of `api://botid-0cf93255-…`, which is what keeps Teams SSO silent
+for both: the Teams manifest declares one `webApplicationInfo.resource`, and each connection then
+exchanges that single SSO token for its own configured scope.
+
+```bash
+az bot authsetting create -g rg-agent365 -n dotnet-agent-teams-bot \
+  -c oboConnectionProfile --client-id <bot app id> --client-secret <bot app secret> \
+  --service AadV2 --provider-scope-string \
+    "api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite" \
+  --parameters tenantID=<tenant> tokenExchangeUrl=api://botid-<bot app id>
+```
+
+> ⚠️ **This is a *custom engine agent*, and getting that classification wrong costs an HTTP 403.**
+> Microsoft's observability guidance splits into scenarios on one testable criterion: whether the
+> incoming turn carries **agentic identity** (`agenticAppId` / `agenticUserId`) from the Agent 365
+> platform. This agent is reached through its **own bot app registration** via Teams, so its turns
+> carry none — confirmed at runtime, which is what the once-per-process
+> `Turn identity: isAgenticRequest=False …` log line in `ResolveObservabilityIdentity` exists to
+> record. That makes it a
+> [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo),
+> and the docs are explicit: *the `agentId` in the token cache must match the app registration's
+> Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
 >
-> Verified by probing the live endpoint with a single token against three agent ids, identical in
-> every other respect:
+> The export route authorises on the token's `azp`, and it must equal the agent id in the URL.
+> Verified by probing the live endpoint with a single token against three ids, identical in every
+> other respect:
 >
 > | agent id in route | result |
 > |---|---|
@@ -220,39 +239,32 @@ which is what makes this path work at all.
 > | blueprint `f56c2c54-…` | **403** |
 > | bot channel app `0cf93255-…` (the token's `azp`) | **415** — authorised, wrong content type |
 >
-> So the id in the route must equal the token's `azp`. That leaves **two valid wirings**, and this
-> repo deliberately uses the second:
+> On this path nothing can make the token's `azp` be the Agent 365 agent identity, because the
+> Token Service issues the token to the bot app. So the route carries the bot app's client id and
+> the two agree.
 >
-> 1. **Post under the bot app id.** This is what Microsoft documents for a
->    [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo):
->    set the Azure Bot OAuth connection's **Scopes** to
->    `api://9b975845-…/Agent365.Observability.OtelWrite`, call `GetTurnTokenAsync` once — the Bot
->    Framework Token Service performs the OBO exchange internally — and cache the result under the
->    **app registration's client id**, which is then the id in the export route. No MSAL, no FMI
->    chain, no blueprint secret. The docs are explicit that a mismatch here is what causes the 403.
-> 2. **Make the token's `azp` be the agent identity.** The three-hop chain above, so the route can
->    carry the Agent 365 **agent identity** — the same id `a365 setup all` registered and the one the
->    other agents in this repo are filed under.
->
-> Both return 200; the probe above shows the service accepts either, provided the route and the
-> token agree. This repo takes route 2 for consistency — every agent here reports under its A365
-> agent identity — at the cost of more code. **Which id Defender and the Admin Center prefer for a
-> custom engine agent is not something this repo has verified**; if you want the documented,
-> minimal path, take route 1.
->
-> The 403 seen from the distro's `AgenticTokenCache` is precisely the mismatch the docs warn about:
-> the cache's token has `azp` = the bot app, while the route carried the agent identity.
->
-> Note that the blueprint never performs the final exchange itself; agentic apps are barred from
-> client-credentials flows (`AADSTS82001`). It only proves ownership of the agent identity at hop 2.
+> **Two traps on the way in.** The distro's `AgenticTokenCache` looks like the OBO answer and the
+> `instrument-observability` skill points at it; it performs a plain on-behalf-of exchange through
+> the bot channel app, so pairing it with an agent-identity route yields **403** — silently, because
+> `GetObservabilityToken` swallows the error and the exporter just logs a failed batch. And an OAuth
+> connection left on the default `api://botid-…/defaultScopes` yields **401 InvalidAudience**, which
+> is why `oboConnectionProfile` exists rather than a re-scoped `BotOAuth`.
 
-**Previous implementation.** This agent originally used the S2S shape
-(`UseS2SEndpoint = true`, a background `ObservabilityTokenService` holding a client-credentials
-token). That worked — exports returned 200 — but the token's principal was the agent alone, with no
-user in it, which is the wrong shape for an agent that has a human on every turn. Microsoft's
-guidance picks the auth mode on whether a user is in the loop at runtime, not on where the agent is
-hosted. The S2S version is preserved on the **`s2s/teams-agents`** branch, which is the last commit
-where both Teams agents still used it.
+**Previous implementations.** Two, in order:
+
+1. **S2S** (`UseS2SEndpoint = true`, a background `ObservabilityTokenService` holding a
+   client-credentials token). Exports returned 200, but the token's principal was the agent alone,
+   with no user in it — the wrong shape for an agent that has a human on every turn. Microsoft's
+   guidance picks the auth mode on whether a user is in the loop at runtime, not on where the agent
+   is hosted. Preserved on the **`s2s/teams-agents`** branch.
+2. **A hand-rolled three-hop FMI chain** (bot app → blueprint with `fmi_path` → agent identity),
+   built to force `azp` to the agent identity so the route could carry it. It worked and returned
+   200, but it is not the documented path for this scenario and it required the blueprint's client
+   secret at runtime. It was written because `instrument-observability` has no custom-engine branch
+   and `a365-code-validator` prescribes that chain from a rule that is specific to **S2S**. See the
+   root README for that write-up. `Agent365/WorkIqTokenService.cs` still implements the chain,
+   because WorkIQ genuinely needs it.
+
 
 Per turn, in `Agent/LearnAgent.cs`:
 
@@ -292,8 +304,9 @@ Per turn, in `Agent/LearnAgent.cs`:
 > carries `user.id` and `user.name` through baggage regardless of auth mode — that was verified on
 > the earlier S2S build, where `invoke_agent` and its `execute_tool` children all named the user and
 > `POST /observabilityService/.../traces` returned **200**. What the S2S build could *not* do is make
-> the **export token** represent the user: its principal was the agent alone. The OBO chain used now
-> gives a token that is both — `azp` = the agent identity, subject = the human.
+> the **export token** represent the user: its principal was the agent alone. The OBO token used now
+> is issued *for the signed-in user*, so the human is its subject; its `azp` is the bot app, which is
+> why the export route carries that id.
 
 ### How WorkIQ is wired
 

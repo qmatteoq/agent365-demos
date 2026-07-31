@@ -155,7 +155,7 @@ apply here:
 | Blueprint can't sign channel replies (`AADSTS82001`) | Not applicable — no channel app to sign as |
 | `a365 setup all` overwrites the bot credentials in place | No bot credentials to overwrite |
 | Observability exported on-behalf-of the human | Agentic User identity |
-| WorkIQ blocked on a service-side 500 | WorkIQ works |
+| WorkIQ tool discovery route returns 500; bypassed via `ToolingManifest.json` | Same bypass — the broken route is service-side, not agent-specific |
 
 ## Agent 365
 

@@ -47,7 +47,7 @@ this setup:
 
 | Identity | App id | Job |
 |---|---|---|
-| Bot channel app | `d1fbe2ae-6c95-492f-b34a-f14451b994f5` | Authenticates the Teams channel, signs outbound replies, and is hop 1 of the observability token chain |
+| Bot channel app | `d1fbe2ae-6c95-492f-b34a-f14451b994f5` | Authenticates the Teams channel, signs outbound replies, and is the principal of the observability token — so it is also the id in the export route |
 | Teams app | `d80a2cae-b655-487a-82be-8bf9271e1d8e` | Identifies the app in the Teams catalogue |
 
 The bot channel app is a plain single-tenant Entra app, **not** an Agent 365 blueprint. Entra
@@ -154,8 +154,8 @@ reference for the OBO path.
 
 | Identity | Used for |
 |---|---|
-| Bot channel app | Signing outbound Bot Framework replies, validating the inbound Teams token, and hop 1 of the observability chain |
-| Blueprint | Hop 2 of the observability chain — proving it owns the agent identity |
+| Bot channel app | Signing outbound Bot Framework replies, validating the inbound Teams token, and — because this is a custom engine agent — being the principal of the observability token and the id in the export route |
+| Blueprint | The Agent 365 registration. Not used at runtime on this path |
 
 Keeping them separate is not a style choice. Entra bars agentic applications from
 client-credentials tokens (**AADSTS82001**), so the blueprint cannot sign channel traffic
@@ -170,35 +170,63 @@ that checks it — point that at the blueprint and every inbound request is reje
 > The running process keeps the old values in memory, so the breakage only surfaces on the
 > next restart.
 
-The blueprint is deliberately **not** registered as an Agents SDK connection. Nothing in
-the SDK needs it; the exporter's token is minted by this project's own code.
+The blueprint is deliberately **not** registered as an Agents SDK connection, and its client
+secret is no longer needed at runtime at all.
 
-### The observability token chain
+### The observability token
 
-`app/a365/fmi.py` runs a three-hop on-behalf-of chain, once per turn:
+There is no chain. `app/main.py` → `_publish_observability_token` makes one call:
 
-1. **Hop 1** — bot channel app + the user's Teams SSO token (OBO) → a token for the
-   blueprint's `access_agent_as_user` scope.
-2. **Hop 2** — blueprint + client secret + `fmi_path=<agent identity>` → an assertion for
-   `api://AzureADTokenExchange`, proving the blueprint owns the agent identity.
-3. **Hop 3** — agent identity, authenticating with that assertion as its client
-   credential and passing the hop 1 token as the user assertion (OBO) → the Observability
-   API token.
+```python
+token = await AGENT_APP.auth.get_token(context, "OBO")
+token_store.set_token(token.token, token.expiration)
+```
 
-The result carries `azp` = the **agent identity** and a subject of the **human user**, and
-the delegated scope `Agent365.Observability.OtelWrite` (a named scope, not `/.default` —
-a delegated token carries scopes, not roles).
+The token comes back already scoped to the Observability API, because the **Azure Bot OAuth
+connection** it is bound to is configured that way. The Bot Framework Token Service performs the
+on-behalf-of exchange internally. No MSAL, no `fmi_path`, no blueprint secret — `app/a365/fmi.py`
+was deleted.
 
-Hop 1 exists because the Azure Bot OAuth connection issues a token whose audience is the
-channel app, and hop 3 only accepts an assertion issued to the blueprint family.
+The work is in the OAuth connection. This bot has two, but only one is used:
 
-> ⚠️ **The export route authorises on `azp`, and this is the trap.** The distro's
-> `AgenticTokenCache` performs a *plain* OBO exchange through the bot channel app, so its
-> token comes back with `azp` = the bot app and every export fails with **HTTP 403** —
-> silently, because the exporter swallows the error and simply never sends.
+| Connection | Scopes | Used for |
+|---|---|---|
+| `oboConnectionProfile` | `api://9b975845-…/Agent365.Observability.OtelWrite` | the `OBO` handler — observability |
+| `BotOAuth` | `api://botid-d1fbe2ae-…/defaultScopes` | left in place from the earlier wiring; nothing references it. The .NET sibling still needs its equivalent for WorkIQ |
+
+Both share a `tokenExchangeUrl` of `api://botid-d1fbe2ae-…`, which keeps Teams SSO silent: the
+Teams manifest declares one `webApplicationInfo.resource`, and the connection exchanges that single
+SSO token for its own configured scope.
+
+```bash
+az bot authsetting create -g rg-agent365 -n python-agent-teams-bot \
+  -c oboConnectionProfile --client-id <bot app id> --client-secret <bot app secret> \
+  --service AadV2 --provider-scope-string \
+    "api://9b975845-388f-4429-889e-eab1ef63949c/Agent365.Observability.OtelWrite" \
+  --parameters tenantID=<tenant> tokenExchangeUrl=api://botid-<bot app id>
+```
+
+The scope is a **named** scope, not `/.default`: a delegated token carries scopes, not roles. A
+connection left on the default `api://botid-…/defaultScopes` produces **401 InvalidAudience**.
+
+> ⚠️ **This is a *custom engine agent*, and getting that classification wrong costs an HTTP 403.**
+> Microsoft's guidance selects the scenario on one testable criterion: whether the turn carries
+> **agentic identity** (`agenticAppId` / `agenticUserId`) from the Agent 365 platform. This agent is
+> reached through its own bot app registration via Teams, so it carries none. That is now directly
+> observed rather than inferred — `app/main.py` logs it once per process:
 >
-> Probed live with a single token and a zero-length protobuf body (a valid empty OTLP
-> request), varying only the agent id in the URL:
+> ```text
+> Turn identity: agentic_app_id=None agentic_user_id=None -> custom engine agent
+> ```
+>
+> So it is a
+> [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo),
+> and the docs are explicit: *the `agentId` in the token cache must match the app registration's
+> Client ID — not the activity's `agenticAppId`, which doesn't exist for custom engine agents.*
+>
+> The export route authorises on the token's `azp`, and it must equal the agent id in the URL.
+> Probed live with a single token and a zero-length protobuf body (a valid empty OTLP request),
+> varying only the agent id:
 >
 > | id in the route | response |
 > |---|---|
@@ -206,42 +234,34 @@ channel app, and hop 3 only accepts an assertion issued to the blueprint family.
 > | blueprint | **403** |
 > | bot channel app (the token's `azp`) | **415** — authorised, wrong content type |
 >
-> So the id in the route must equal the token's `azp`. That leaves **two valid wirings**, and this
-> repo deliberately uses the second:
->
-> 1. **Post under the bot app id** — the path Microsoft documents for a
->    [custom engine agent using OBO](https://learn.microsoft.com/microsoft-agent-365/developer/observability-authentication-setup#custom-engine-using-obo).
->    Set the Azure Bot OAuth connection's **Scopes** to
->    `api://9b975845-…/Agent365.Observability.OtelWrite`, add `SCOPES` and `TYPE=UserAuthorization`
->    to the handler, and a single `AGENT_APP.auth.get_token(context, "OBO")` returns a token already
->    scoped to the observability API — the Bot Framework Token Service does the exchange. Cache it
->    under the **app registration's client id**, which is then the id in the export route. No MSAL,
->    no `fmi_path`, no blueprint secret.
-> 2. **Make the token's `azp` be the agent identity** — the three-hop chain above, so the route can
->    carry the Agent 365 **agent identity** that `a365 setup all` registered.
->
-> Both return 200. This repo takes route 2 so every agent reports under its A365 agent identity, at
-> the cost of more code. **Which id Defender and the Admin Center prefer for a custom engine agent
-> is not something this repo has verified**; for the documented, minimal path, take route 1.
+> On this path nothing can make `azp` be the Agent 365 agent identity: the Token Service issues the
+> token to the bot app. So the route carries the bot app's client id and the two agree.
 
-> The blueprint never performs the final exchange itself: Entra bars agentic applications
-> from client-credentials flows (`AADSTS82001`). It only proves ownership at hop 2.
+> 🪤 **`AgentDetails` alone is not enough — baggage carries the id too.** Auto-instrumented
+> LangChain and LLM spans read `gen_ai.agent.id` from **baggage**, not from the invoke scope.
+> Setting `build_agent_details` to the new id while leaving `build_baggage_scope` on the old one
+> split a single turn into **two identity groups**: one exported 200, the other returned
+> **400 `TenantIdInvalid`** because no token was bound to it. Both helpers in
+> `app/a365/observability.py` must use `settings.observability_agent_id`.
 
-MSAL Python 1.37 supports `fmi_path` on `acquire_token_for_client` natively, so all three
-hops are ordinary MSAL calls. (The sibling `python-agent-no-teams` agent hand-rolls its
-hops over raw HTTP on the belief that MSAL cannot do this — that is no longer true.)
+The exporter flushes on a background thread with no turn context, so it cannot fetch the token
+itself. It is fetched in the message handler, while the turn is still live, and deposited in
+`app/a365/token_store.py` for the exporter's resolver to read back.
 
-The exporter flushes on a background thread with no turn context, so it cannot run this
-chain itself. The token is minted in the message handler, while the user's assertion is
-still in hand, and deposited in `app/a365/token_store.py` for the exporter's resolver to
-read back. It is cached until five minutes before expiry, so most turns cost nothing.
+**Previous implementations.** Two, in order:
 
-**Previous implementation.** This agent originally used the S2S shape
-(`a365_use_s2s_endpoint=True`, a background refresh loop holding a client-credentials
-token). That worked — exports returned 200 — but the token's principal was the agent
-alone, with no user in it, which is the wrong shape for an agent that has a human on every
-turn. The auth mode is decided by whether a user is in the loop at runtime, not by where
-the agent is hosted. The S2S version is preserved on the **`s2s/teams-agents`** branch.
+1. **S2S** (`a365_use_s2s_endpoint=True`, a background refresh loop holding a client-credentials
+   token). Exports returned 200, but the token's principal was the agent alone, with no user in it —
+   the wrong shape for an agent that has a human on every turn. The auth mode is decided by whether
+   a user is in the loop at runtime, not by where the agent is hosted. Preserved on the
+   **`s2s/teams-agents`** branch.
+2. **A hand-rolled three-hop FMI chain** in `app/a365/fmi.py` (bot app → blueprint with `fmi_path` →
+   agent identity), built to force `azp` to the agent identity so the route could carry it. It
+   worked and returned 200, but it is not the documented path for this scenario and needed the
+   blueprint secret at runtime. It was written because `instrument-observability` has no
+   custom-engine branch; see the root README. (For the record, MSAL Python 1.37 does support
+   `fmi_path` on `acquire_token_for_client` natively — the sibling `python-agent-no-teams` README
+   claims otherwise and is wrong.)
 
 ### Instrumentation notes
 
