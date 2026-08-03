@@ -272,10 +272,12 @@
     /// </summary>
     private (string UserId, string UserName, string UserEmail) ResolveCaller() =>
     (
-        _user?.FindFirst("oid")?.Value
-            ?? _user?.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? "unknown",
-        _user?.Identity?.Name ?? "unknown",
+        // GetObjectId() reads the caller's directory object id whether or not the OIDC
+        // handler mapped inbound claims. Looking up "oid" directly misses it, because the
+        // handler renames that claim, and the NameIdentifier fallback yields the pairwise
+        // "sub" hash instead - which the admin center cannot resolve back to a user.
+        _user?.GetObjectId() ?? "unknown",
+        _user?.GetDisplayName() ?? _user?.Identity?.Name ?? "unknown",
         _user?.FindFirst("preferred_username")?.Value
             ?? _user?.FindFirst(ClaimTypes.Email)?.Value
             ?? string.Empty
