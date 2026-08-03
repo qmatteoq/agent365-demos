@@ -115,6 +115,7 @@ function card(a) {
   h += '<span class="tag">' + esc(a.stack) + '</span>';
   h += '<span class="tag">' + esc(a.hosting) + '</span>';
   if (a.port) h += '<span class="tag">:' + esc(a.port) + '</span>';
+  if (a.openOnStart) h += '<span class="tag" title="The browser opens on this page once the agent is serving">opens browser</span>';
   if (a.caps) {
     h += capTag('identity', a.caps.identity);
     h += capTag('observability', a.caps.observability);

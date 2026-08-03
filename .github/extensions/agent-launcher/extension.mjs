@@ -130,6 +130,7 @@ function registry(root) {
             cmd: "dotnet",
             args: ["run", "--project", "LearnMcpAgent.csproj", "--launch-profile", "https"],
             caps: { identity: true, observability: true, workiq: true },
+            openOnStart: true,
         },
         {
             id: "dotnet-teams",
@@ -177,6 +178,7 @@ function registry(root) {
             cmd: join(root, "python-agent-no-teams", ".venv", "Scripts", "python.exe"),
             args: ["-m", "app.main"],
             caps: { identity: true, observability: true, workiq: false },
+            openOnStart: true,
             note: "Sign in on localhost, not 127.0.0.1 - the session cookie is host-specific.",
         },
         {
@@ -302,6 +304,29 @@ function findPidByPort(port) {
 const started = new Map();
 const errors = new Map();
 
+// Agents launched from here that should have their page opened as soon as they
+// are actually serving. Membership - rather than a plain status check - is what
+// keeps a refresh from reopening the browser for an agent that was already up,
+// or one you started yourself from a terminal.
+const pendingOpen = new Set();
+
+function openInBrowser(url) {
+    // `start` is a cmd builtin, so it needs a shell. The empty string is the
+    // window-title argument: without it, `start` would treat the url as the
+    // title and open nothing.
+    const child =
+        process.platform === "win32"
+            ? spawn("cmd", ["/c", "start", "", url], { detached: true, windowsHide: true, stdio: "ignore" })
+            : spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], {
+                  detached: true,
+                  stdio: "ignore",
+              });
+    child.on("error", () => {
+        /* no browser is not worth failing a launch over */
+    });
+    child.unref();
+}
+
 function logPathFor(id) {
     return join(tmpdir(), `agent-launcher-${id}.log`);
 }
@@ -328,12 +353,18 @@ async function describe(agent) {
         if (up) {
             status = "running";
             pid = (await findPidByPort(agent.port)) ?? tracked ?? null;
+            // First poll that finds it serving: open its page, once.
+            if (pendingOpen.delete(agent.id) && agent.url) openInBrowser(agent.url);
         } else if (tracked && isAlive(tracked)) {
             // Spawned and still alive, but nothing is listening yet. `dotnet run`
             // builds first, which can take a minute - reporting "stopped" here
             // invites a second click and a duplicate process.
             status = "starting";
             pid = tracked;
+        } else {
+            // It died before it ever served, so drop the pending open rather
+            // than firing a browser at a dead port on some later launch.
+            pendingOpen.delete(agent.id);
         }
     } else if (agent.trackedOnly) {
         // No port to probe: only trust a child we started that is still alive.
@@ -354,6 +385,7 @@ async function describe(agent) {
         port: agent.port,
         url: agent.url,
         caps: agent.caps,
+        openOnStart: !!agent.openOnStart,
         note: agent.note || null,
         auid: ids.auid,
         auidNote: agent.auidNote || null,
@@ -396,6 +428,7 @@ function startAgent(agent) {
         child.on("error", (e) => errors.set(agent.id, String(e.message || e)));
         child.unref();
         started.set(agent.id, child.pid);
+        if (agent.openOnStart && agent.url) pendingOpen.add(agent.id);
         return { ok: true, pid: child.pid };
     } catch (e) {
         errors.set(agent.id, String(e.message || e));
@@ -405,6 +438,8 @@ function startAgent(agent) {
 
 async function stopAgent(agent) {
     errors.delete(agent.id);
+    // Stopped before it ever served: cancel the queued browser open.
+    pendingOpen.delete(agent.id);
     let pid = agent.port ? await findPidByPort(agent.port) : null;
     if (!pid) pid = started.get(agent.id) ?? null;
     if (!pid) return { ok: false, error: "No process found to stop." };

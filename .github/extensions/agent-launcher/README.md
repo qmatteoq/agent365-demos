@@ -32,6 +32,9 @@ to `%TEMP%\agent-launcher-<id>.log`.
 | `python-agent-teams` | `.venv\Scripts\python.exe -m app.main` | 3979 |
 | dev tunnel × 3 | `devtunnel host <tunnel-name>` | — |
 
+The two `no-teams` agents serve their own web UI and open in your browser once they are up — see
+[Opening the web agents](#opening-the-web-agents).
+
 The three Teams-hosted agents are only reachable from Teams while their dev tunnel is hosting, so
 each has its own tunnel card. **The tunnel names are placeholders for whichever named tunnels you
 created** — edit `registry()` in `extension.mjs` to match yours. A tunnel has no local port to probe,
@@ -76,8 +79,25 @@ config folder rather than the repository, which is measured behaviour, not an as
 `starting` exists so a slow first build does not read as a failed launch. While it shows, the button
 is **Stop**, not Start, so a second click cannot leave a duplicate process behind.
 
-`process.cwd()` is deliberately **not** used. For a user-scoped extension it is the Copilot config
-folder rather than the repository, which is measured behaviour, not an assumption.
+## Opening the web agents
+
+The two agents that serve their own UI — `dotnet-agent-no-teams` and `python-agent-no-teams` — open
+in your default browser as soon as they finish starting. Their cards are tagged **opens browser**.
+The Teams-hosted agents have no page of their own, so nothing opens for them.
+
+The behaviour is driven by `openOnStart: true` in `registry()`; remove it from an entry to opt out.
+
+Two details make it behave rather than becoming a nuisance:
+
+- It fires only for a launch you started **from this dashboard**, and only once. Refreshing the
+  dashboard, or opening it on an agent that was already running, never reopens the browser.
+- It waits for the port to actually accept connections. `dotnet run` builds before it listens, so
+  opening at spawn time would land on a connection error.
+
+Stopping an agent while it is still `starting` cancels the pending open.
+
+The URLs use `localhost`, not `127.0.0.1`, because both agents sign you in and the registered
+redirect URIs and auth cookies are host-specific.
 
 ## Secrets
 
