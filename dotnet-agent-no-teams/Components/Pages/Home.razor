@@ -301,8 +301,18 @@
         // Blueprint id is a GUID and therefore always URI-safe; the display name is not.
         var endpoint = new Uri($"https://{A365.BlueprintClientId}.agent.invalid/");
 
+        // Session, channel and conversation have to be on the Request itself, not only in
+        // baggage. Baggage lands on the span tags, but the exported invoke_agent payload is
+        // built from this object (InvokeAgentDataBuilder -> AddRequestDetails), so leaving
+        // them null exports a span that is accepted and still shows no run context.
+        var request = new Request(
+            content: userText,
+            sessionId: _conversationId,
+            channel: new Channel("web"),
+            conversationId: _conversationId);
+
         return InvokeAgentScope.Start(
-            new Request(userText),
+            request,
             new InvokeAgentScopeDetails(endpoint: endpoint),
             agentDetails,
             callerDetails);
