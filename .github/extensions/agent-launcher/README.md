@@ -14,12 +14,19 @@ you:
 
 - **Live status**, polled from the agent's listening port every three seconds, plus its pid
 - **Start / Stop**, running the same command the agent's <kbd>F5</kbd> profile runs
-- **Open**, for the two agents that have a browsable url
+- **Open page**, for the two agents that have a browsable url
+- **Log**, opening that agent's captured stdout/stderr in your default editor
 - **Blueprint id and AUID**, click-to-copy, read from each agent's `a365.generated.config.json`
 - The **capability tags** (identity / observability / Work IQ) for that agent
 
 Agents are started **detached**, so closing the panel leaves them running. Their stdout and stderr go
-to `%TEMP%\agent-launcher-<id>.log`.
+to `%TEMP%\agent-launcher-<id>.log`, which is what **Log** opens. The button is disabled until that
+file exists, since an agent that has never been started from here has nothing to show.
+
+Both buttons act through the extension backend rather than from the page. The canvas webview blocks
+`target="_blank"` navigation, so an ordinary link renders as a perfectly normal-looking button that
+silently does nothing when clicked. If either button cannot do its job it says so on the button face
+instead of failing quietly.
 
 ## What it launches
 

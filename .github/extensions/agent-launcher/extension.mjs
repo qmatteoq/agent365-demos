@@ -310,19 +310,20 @@ const errors = new Map();
 // or one you started yourself from a terminal.
 const pendingOpen = new Set();
 
-function openInBrowser(url) {
+function openExternal(target) {
     // `start` is a cmd builtin, so it needs a shell. The empty string is the
-    // window-title argument: without it, `start` would treat the url as the
-    // title and open nothing.
+    // window-title argument: without it, `start` would treat the target as the
+    // title and open nothing. Works for both urls and file paths - the shell
+    // picks the registered handler either way.
     const child =
         process.platform === "win32"
-            ? spawn("cmd", ["/c", "start", "", url], { detached: true, windowsHide: true, stdio: "ignore" })
-            : spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], {
+            ? spawn("cmd", ["/c", "start", "", target], { detached: true, windowsHide: true, stdio: "ignore" })
+            : spawn(process.platform === "darwin" ? "open" : "xdg-open", [target], {
                   detached: true,
                   stdio: "ignore",
               });
     child.on("error", () => {
-        /* no browser is not worth failing a launch over */
+        /* no handler is not worth failing a launch over */
     });
     child.unref();
 }
@@ -354,7 +355,7 @@ async function describe(agent) {
             status = "running";
             pid = (await findPidByPort(agent.port)) ?? tracked ?? null;
             // First poll that finds it serving: open its page, once.
-            if (pendingOpen.delete(agent.id) && agent.url) openInBrowser(agent.url);
+            if (pendingOpen.delete(agent.id) && agent.url) openExternal(agent.url);
         } else if (tracked && isAlive(tracked)) {
             // Spawned and still alive, but nothing is listening yet. `dotnet run`
             // builds first, which can take a minute - reporting "stopped" here
@@ -393,6 +394,7 @@ async function describe(agent) {
         status,
         pid,
         logPath: logPathFor(agent.id),
+        hasLog: existsSync(logPathFor(agent.id)),
         error: errors.get(agent.id) || null,
         missing: !existsSync(agent.dir),
     };
@@ -480,6 +482,26 @@ async function startServer({ root, reason }) {
             const agent = byId.get(decodeURIComponent(action[2]));
             if (!agent) return send(404, { ok: false, error: "Unknown agent" });
             return send(200, action[1] === "start" ? startAgent(agent) : await stopAgent(agent));
+        }
+
+        // Opening happens here rather than in the page, because the canvas
+        // webview blocks `target="_blank"` navigation - an anchor looks like a
+        // working button and silently does nothing.
+        const reveal = url.pathname.match(/^\/api\/(open|log)\/(.+)$/);
+        if (reveal && req.method === "POST") {
+            const agent = byId.get(decodeURIComponent(reveal[2]));
+            if (!agent) return send(404, { ok: false, error: "Unknown agent" });
+            if (reveal[1] === "open") {
+                if (!agent.url) return send(400, { ok: false, error: "This card has no page to open." });
+                openExternal(agent.url);
+                return send(200, { ok: true, opened: agent.url });
+            }
+            const file = logPathFor(agent.id);
+            if (!existsSync(file)) {
+                return send(200, { ok: false, error: "No log yet - start it from here first." });
+            }
+            openExternal(file);
+            return send(200, { ok: true, opened: file });
         }
 
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });

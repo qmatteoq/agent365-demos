@@ -144,10 +144,11 @@ function card(a) {
     h += '<button class="start" onclick="act(\\'start\\',\\'' + a.id + '\\')"' + (isBusy ? ' disabled' : '') + '>Start</button>';
   }
   if (a.url && a.status === 'running') {
-    h += '<a class="btn" href="' + esc(a.url) + '" target="_blank" rel="noopener">Open</a>';
+    h += '<button class="btn" title="' + esc(a.url) + '" onclick="reveal(this,\\'open\\',\\'' + a.id + '\\')">Open page</button>';
   }
   if (a.logPath) {
-    h += '<span class="tag" title="' + esc(a.logPath) + '">log</span>';
+    h += '<button class="btn" title="' + esc(a.logPath) + '"' + (a.hasLog ? '' : ' disabled') +
+         ' onclick="reveal(this,\\'log\\',\\'' + a.id + '\\')">Log</button>';
   }
   h += '</div>';
 
@@ -164,6 +165,24 @@ function copy(el) {
   var old = el.style.color;
   el.style.color = '#3fb950';
   setTimeout(function () { el.style.color = old; }, 600);
+}
+
+function reveal(btn, what, id) {
+  var label = btn.textContent;
+  fetch('/api/' + what + '/' + encodeURIComponent(id), { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      // Say so when nothing opened. A button that silently does nothing is the
+      // bug this replaced.
+      if (r.ok) return;
+      btn.textContent = r.error || 'failed';
+      btn.disabled = true;
+      setTimeout(function () { btn.textContent = label; btn.disabled = false; }, 2500);
+    })
+    .catch(function () {
+      btn.textContent = 'failed';
+      setTimeout(function () { btn.textContent = label; }, 2500);
+    });
 }
 
 function act(what, id) {
