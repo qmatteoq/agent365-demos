@@ -39,6 +39,9 @@ export function renderHtml() {
   .badge.on .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
   .badge.unknown { color: var(--warn); border-color: rgba(210,153,34,.4); }
   .badge.unknown .dot { background: var(--warn); }
+  .badge.starting { color: var(--accent); border-color: rgba(47,129,247,.4); }
+  .badge.starting .dot { background: var(--accent); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
   .desc { color: var(--muted); font-size: 12.5px; margin: 8px 0 10px; }
   .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .tag {
@@ -100,7 +103,7 @@ function card(a) {
   var isBusy = !!busy[a.id];
   var h = '<div class="card' + (isBusy ? ' busy' : '') + '">';
 
-  var cls = a.status === 'running' ? 'on' : (a.status === 'unknown' ? 'unknown' : '');
+  var cls = a.status === 'running' ? 'on' : (a.status === 'unknown' ? 'unknown' : (a.status === 'starting' ? 'starting' : ''));
   h += '<div class="row"><span class="name">' + esc(a.name) + '</span>';
   h += '<span class="badge ' + cls + '"><span class="dot"></span>' + esc(a.status) + '</span>';
   if (a.pid) h += '<span class="tag">pid ' + esc(a.pid) + '</span>';
@@ -134,7 +137,7 @@ function card(a) {
   }
 
   h += '<div class="row">';
-  if (a.status === 'running') {
+  if (a.status === 'running' || a.status === 'starting') {
     h += '<button class="stop" onclick="act(\\'stop\\',\\'' + a.id + '\\')"' + (isBusy ? ' disabled' : '') + '>Stop</button>';
   } else {
     h += '<button class="start" onclick="act(\\'start\\',\\'' + a.id + '\\')"' + (isBusy ? ' disabled' : '') + '>Start</button>';
@@ -187,7 +190,9 @@ function refresh() {
       document.getElementById('clocktxt').textContent =
         d.agents.filter(function (a) { return a.status === 'running'; }).length + ' running';
       document.getElementById('clock').className = 'badge on';
-      document.getElementById('foot').textContent = 'Root: ' + d.root + '  |  refreshed ' + new Date().toLocaleTimeString();
+      document.getElementById('foot').textContent =
+        'Root: ' + d.root + (d.reason ? '  (' + d.reason + ')' : '') +
+        '  |  refreshed ' + new Date().toLocaleTimeString();
     })
     .catch(function (e) {
       document.getElementById('clocktxt').textContent = 'disconnected';

@@ -6,48 +6,111 @@
 
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { readFileSync, existsSync, openSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import { renderHtml } from "./ui.mjs";
 
-// Folder that holds the agent subfolders. Resolved in this order:
+// Which folder holds the agents?
 //
-//   1. the `root` canvas input, if the caller passed one
-//   2. AGENT365_ROOT in the environment
-//   3. the nearest ancestor of this file that actually contains the agents -
-//      which is what makes this work on any clone with no path to edit
-//   4. three levels up, the repository root for a copy living in
-//      <repo>/.github/extensions/agent-launcher
+// Finding a checkout is not the same as finding a *runnable* checkout. Every
+// artifact an agent needs to start - .venv, .env, a365.generated.config.json -
+// is gitignored, so it exists only where you provisioned it. A git worktree
+// created for editing has the same source tree and none of that, and pointing
+// the dashboard at one produces "Interpreter not found".
 //
-// process.cwd() is deliberately not used: for a user-scoped extension it is the
-// Copilot config folder, not the repository (measured, not assumed).
-const MARKERS = ["dotnet-agent-teams", "python-agent-teams", "dotnet-agent-teammate"];
+// So candidate roots are scored on evidence of provisioning rather than on
+// source layout, and the best-provisioned one wins. An explicit choice (canvas
+// input or AGENT365_ROOT) always wins outright, even if it scores zero.
+const AGENTS = [
+    "dotnet-agent-no-teams",
+    "dotnet-agent-teams",
+    "dotnet-agent-teammate",
+    "python-agent-no-teams",
+    "python-agent-teams",
+];
+
+// Gitignored, so their presence means "provisioned here", not "checked out here".
+const PROVISIONED = [
+    "a365.generated.config.json",
+    ".env",
+    join(".venv", "Scripts", "python.exe"),
+];
 
 function looksLikeRepo(dir) {
-    return MARKERS.some((m) => existsSync(join(dir, m)));
+    return AGENTS.some((a) => existsSync(join(dir, a)));
 }
 
-function discoverRoot() {
+function scoreRoot(dir) {
+    if (!dir || !existsSync(dir)) return -1;
+    let score = 0;
+    for (const agent of AGENTS) {
+        const d = join(dir, agent);
+        if (!existsSync(d)) continue;
+        for (const marker of PROVISIONED) if (existsSync(join(d, marker))) score++;
+    }
+    return score;
+}
+
+// Ancestors of this file that hold the agents - covers both a copy committed to
+// <repo>/.github/extensions/ and one dropped straight into the repo root.
+function ancestorRoots() {
+    const found = [];
     let dir = import.meta.dirname;
     for (let i = 0; i < 6; i++) {
-        if (looksLikeRepo(dir)) return dir;
+        if (looksLikeRepo(dir)) found.push(dir);
         const parent = dirname(dir);
         if (parent === dir) break;
         dir = parent;
     }
-    return null;
+    return found;
+}
+
+// The checkout a worktree was created from. This is the one case where the
+// provisioned copy is derivable rather than guessed.
+function mainWorktree(from) {
+    try {
+        const out = execFileSync("git", ["worktree", "list", "--porcelain"], {
+            cwd: from,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+        });
+        const first = out.split(/\r?\n/).find((l) => l.startsWith("worktree "));
+        return first ? first.slice("worktree ".length).trim() : null;
+    } catch {
+        return null;
+    }
 }
 
 function resolveRoot(input) {
-    return (
-        input ||
-        process.env.AGENT365_ROOT ||
-        discoverRoot() ||
-        dirname(dirname(dirname(import.meta.dirname)))
-    );
+    const explicit = input || process.env.AGENT365_ROOT;
+    if (explicit) {
+        return { root: resolve(explicit), reason: input ? "canvas input" : "AGENT365_ROOT" };
+    }
+
+    const candidates = [];
+    const ancestors = ancestorRoots();
+    for (const dir of ancestors) candidates.push({ dir, reason: "repository containing this extension" });
+    for (const dir of ancestors) {
+        const main = mainWorktree(dir);
+        if (main && !candidates.some((c) => c.dir === main)) {
+            candidates.push({ dir: main, reason: "main checkout of this worktree" });
+        }
+    }
+
+    let best = null;
+    for (const c of candidates) {
+        const score = scoreRoot(c.dir);
+        if (!best || score > best.score) best = { ...c, score };
+    }
+
+    if (best && best.score > 0) return { root: resolve(best.dir), reason: best.reason };
+    // Nothing is provisioned anywhere: fall back to the repo so the cards at
+    // least render, and let each one report what it is missing.
+    const fallback = ancestors[0] || dirname(dirname(dirname(import.meta.dirname)));
+    return { root: resolve(fallback), reason: "no provisioned checkout found" };
 }
 
 // Launch commands mirror each agent's .vscode/launch.json so the button and F5
@@ -253,15 +316,25 @@ function isAlive(pid) {
 }
 
 async function describe(agent) {
-    const ids = readIds(agent.dir);
+    // Tunnels are relays, not agents - they have no identity of their own, so
+    // showing the agent's ids on their card would be misleading.
+    const ids = agent.trackedOnly ? { auid: null, blueprint: null } : readIds(agent.dir);
     const tracked = started.get(agent.id);
     let status = "stopped";
     let pid = null;
 
     if (agent.port) {
         const up = await probePort(agent.port);
-        status = up ? "running" : "stopped";
-        if (up) pid = (await findPidByPort(agent.port)) ?? tracked ?? null;
+        if (up) {
+            status = "running";
+            pid = (await findPidByPort(agent.port)) ?? tracked ?? null;
+        } else if (tracked && isAlive(tracked)) {
+            // Spawned and still alive, but nothing is listening yet. `dotnet run`
+            // builds first, which can take a minute - reporting "stopped" here
+            // invites a second click and a duplicate process.
+            status = "starting";
+            pid = tracked;
+        }
     } else if (agent.trackedOnly) {
         // No port to probe: only trust a child we started that is still alive.
         if (tracked && isAlive(tracked)) {
@@ -300,7 +373,15 @@ function startAgent(agent) {
         return { ok: false, error: errors.get(agent.id) };
     }
     if (agent.cmd.includes("\\") && !existsSync(agent.cmd)) {
-        errors.set(agent.id, `Interpreter not found: ${agent.cmd}`);
+        errors.set(
+            agent.id,
+            `No virtual environment at ${agent.dir}\\.venv.\n` +
+                `Create one, then press Start again:\n` +
+                `  cd ${agent.dir}\n` +
+                `  uv venv --clear --python C:\\Python312-x64\\python.exe\n` +
+                `  uv sync\n` +
+                `On Windows ARM the x64 interpreter is required - tiktoken has no win_arm64 wheel.`
+        );
         return { ok: false, error: errors.get(agent.id) };
     }
     try {
@@ -344,7 +425,7 @@ async function stopAgent(agent) {
 
 const servers = new Map();
 
-async function startServer(root) {
+async function startServer({ root, reason }) {
     const agents = registry(root);
     const byId = new Map(agents.map((a) => [a.id, a]));
 
@@ -356,7 +437,7 @@ async function startServer(root) {
         };
 
         if (url.pathname === "/api/agents") {
-            return send(200, { root, agents: await Promise.all(agents.map(describe)) });
+            return send(200, { root, reason, agents: await Promise.all(agents.map(describe)) });
         }
 
         const action = url.pathname.match(/^\/api\/(start|stop)\/(.+)$/);

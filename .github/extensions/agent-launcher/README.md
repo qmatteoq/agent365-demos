@@ -39,17 +39,42 @@ so its status reads `unknown` until you start it from here.
 
 ## How it finds the agents
 
-`resolveRoot()` takes the first of:
+This is the part worth understanding, because getting it wrong is what makes Start fail.
 
-1. the `root` canvas input
-2. the `AGENT365_ROOT` environment variable
-3. the nearest ancestor of `extension.mjs` that contains the agent folders
-4. three levels up, the repository root for a copy living in `.github/extensions/agent-launcher`
+Finding a *checkout* is not the same as finding a *runnable* checkout. Everything an agent needs to
+start — `.venv`, `.env`, `a365.generated.config.json` — is gitignored, so it exists only where you
+provisioned it. A git worktree created for editing has an identical source tree and none of that, and
+pointing the dashboard at one produces `Interpreter not found`.
 
-Steps 3 and 4 are what make the committed copy portable: it walks up from
-`.github/extensions/agent-launcher` to the repository root, so the extension works on any clone with
-no path to edit. A card whose folder cannot be found says so on its face rather than reporting
-`stopped`.
+So candidate roots are scored on **evidence of provisioning** rather than on source layout, and the
+best-scoring one wins:
+
+| Candidate | Where it comes from |
+| --- | --- |
+| `root` canvas input | Passed when the canvas is opened |
+| `AGENT365_ROOT` | Environment variable |
+| Ancestors of `extension.mjs` | The repository this copy is committed to |
+| `git worktree list` | The main checkout a worktree was created from |
+
+An explicit choice — canvas input or `AGENT365_ROOT` — always wins outright, even if it scores zero.
+Otherwise each candidate scores a point per gitignored provisioning artifact found, and the highest
+wins. The footer reports which root was chosen and why, so a surprising result is visible rather than
+silent.
+
+`process.cwd()` is deliberately **not** a candidate. For a user-scoped extension it is the Copilot
+config folder rather than the repository, which is measured behaviour, not an assumption.
+
+## Status
+
+| Status | Meaning |
+| --- | --- |
+| `running` | Something is listening on the agent's port |
+| `starting` | Spawned and alive, but not listening yet — `dotnet run` builds first |
+| `stopped` | Not listening, nothing tracked |
+| `unknown` | A tunnel that was not started from here, so there is nothing to probe |
+
+`starting` exists so a slow first build does not read as a failed launch. While it shows, the button
+is **Stop**, not Start, so a second click cannot leave a duplicate process behind.
 
 `process.cwd()` is deliberately **not** used. For a user-scoped extension it is the Copilot config
 folder rather than the repository, which is measured behaviour, not an assumption.
@@ -64,6 +89,9 @@ browser. The file is gitignored, so on a fresh clone the cards simply show no id
 `dotnet-agent-teammate` never shows an AUID. An AI Teammate's instance id is provisioned when an
 admin approves an instance and is read off the activity per turn, so there is no static value to
 display; the card says so rather than showing a blank.
+
+The tunnel cards show no ids at all. A tunnel is a relay with no identity of its own, so showing the
+agent's ids there would suggest a relationship that does not exist.
 
 ## Files
 
