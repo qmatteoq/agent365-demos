@@ -16,6 +16,7 @@
 @inject ITokenAcquisition TokenAcquisition
 @inject MicrosoftIdentityConsentAndConditionalAccessHandler ConsentHandler
 @inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Navigation
 @inject ILogger<Home> Logger
 @implements IAsyncDisposable
 
@@ -99,6 +100,10 @@
     // Observability API — the resource the agent posts its OTLP traces to.
     private const string ObservabilityScope = "api://9b975845-388f-4429-889e-eab1ef63949c/.default";
 
+    // Appended to the post-sign-in return URL so a sign-in that still leaves us without a token
+    // reports the problem instead of bouncing the browser between here and Entra forever.
+    private const string AuthRetryMarker = "authretry=1";
+
     private readonly List<ChatEntry> _messages = new();
 
     // Tools called during the turn that is currently running.
@@ -117,6 +122,7 @@
     private string? _currentActivity;
     private string? _observabilityWarning;
     private ClaimsPrincipal? _user;
+    private bool _signInChecked;
 
     protected override async Task OnInitializedAsync()
     {
@@ -130,6 +136,38 @@
             _currentActivity = DescribeActivity(invocation);
             await InvokeAsync(StateHasChanged);
         };
+    }
+
+    // The [Authorize] attribute only proves the caller holds a valid auth cookie. That cookie is
+    // encrypted with Data Protection keys kept on disk, so it outlives the process, while the MSAL
+    // token cache is in-memory and does not. After a restart the browser therefore looks signed in
+    // while there is no token to exchange for the agent's OBO chain. Find that out at page load and
+    // send the user through sign-in, rather than letting them discover it on their first message.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Only runs on the interactive circuit, never during prerender, so navigation is safe here.
+        if (!firstRender || _signInChecked) return;
+        _signInChecked = true;
+
+        try
+        {
+            await TokenAcquisition.GetAccessTokenForUserAsync([A365.AgentUserScope]);
+        }
+        catch (Exception ex)
+        {
+            if (Navigation.Uri.Contains(AuthRetryMarker, StringComparison.Ordinal))
+            {
+                Logger.LogWarning(ex, "Still no token for the caller after signing in.");
+                _observabilityWarning = "could not obtain a token for the signed-in user — traces are not exported.";
+                StateHasChanged();
+                return;
+            }
+
+            Logger.LogInformation(ex, "No token cached for the caller; sending them through sign-in.");
+
+            var returnUrl = Uri.EscapeDataString($"/?{AuthRetryMarker}");
+            Navigation.NavigateTo($"MicrosoftIdentity/Account/SignIn?redirectUri={returnUrl}", forceLoad: true);
+        }
     }
 
     private static string DescribeActivity(ToolInvocation invocation) =>
